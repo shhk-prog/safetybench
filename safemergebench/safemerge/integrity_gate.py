@@ -57,10 +57,46 @@ def _load_json(model, filename):
         return json.load(f)
 
 
-def template_family(tok_cfg):
+def _load_text(model, filename):
+    if os.path.isdir(model):
+        path = os.path.join(model, filename)
+        if not os.path.exists(path):
+            return None
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(model, filename)
+        except Exception:
+            return None
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _normalize_config(cfg):
+    """Normalize transformers v5 `rope_parameters` back into `rope_theta` and `rope_scaling`
+    so models saved with transformers v4 and v5 compare cleanly on CONFIG_KEYS.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    out = dict(cfg)
+    rp = out.get("rope_parameters")
+    if isinstance(rp, dict):
+        if out.get("rope_theta") is None and "rope_theta" in rp:
+            out["rope_theta"] = rp["rope_theta"]
+        if out.get("rope_scaling") is None:
+            scaling = {k: v for k, v in rp.items() if k != "rope_theta"}
+            # Only treat as rope_scaling when non-default scaling keys exist
+            if scaling and not (set(scaling.keys()) == {"rope_type"} and scaling["rope_type"] == "default"):
+                out["rope_scaling"] = scaling
+    return out
+
+
+def template_family(tok_cfg, jinja_text=None):
     tpl = (tok_cfg or {}).get("chat_template")
     if isinstance(tpl, list):  # some tokenizers store named templates
         tpl = " ".join(t.get("template", "") for t in tpl)
+    if not tpl and jinja_text:
+        tpl = jinja_text
     if not tpl:
         return None
     for name, marker in TEMPLATE_MARKERS.items():
@@ -71,7 +107,7 @@ def template_family(tok_cfg):
 
 def check_config(base, inputs, merged):
     issues = []
-    cfgs = {m: _load_json(m, "config.json") for m in [base, *inputs, merged]}
+    cfgs = {m: _normalize_config(_load_json(m, "config.json")) for m in [base, *inputs, merged]}
     for m, c in cfgs.items():
         if c is None:
             issues.append({"check": "config", "model": m, "problem": "config.json not found"})
@@ -89,7 +125,9 @@ def check_config(base, inputs, merged):
 def check_template(inputs, merged, eval_template):
     issues, fams = [], {}
     for m in [*inputs, merged]:
-        fams[m] = template_family(_load_json(m, "tokenizer_config.json"))
+        tok_cfg = _load_json(m, "tokenizer_config.json")
+        jinja = None if (tok_cfg or {}).get("chat_template") else _load_text(m, "chat_template.jinja")
+        fams[m] = template_family(tok_cfg, jinja_text=jinja)
     distinct = {f for f in fams.values()}
     if len(distinct) > 1:
         issues.append({"check": "template", "problem": "inputs/merged disagree", "families": fams})

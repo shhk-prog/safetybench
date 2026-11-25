@@ -118,13 +118,13 @@ class Fisher(Merger):
 
                 elif fisher_complete and not params_complete:
                     print(f"Processing {dataset_name}")
-                    if dist.get_rank() == 0:
+                    if not dist.is_initialized() or dist.get_rank() == 0:
                         save_tensor_dict(finetuned_model.state_dict(), os.path.join(param_dir, dataset_name))
                     continue
 
                 print(f"Processing {dataset_name}")
                 if not params_complete:
-                    if dist.get_rank() == 0:
+                    if not dist.is_initialized() or dist.get_rank() == 0:
                         save_tensor_dict(finetuned_model.state_dict(), os.path.join(param_dir, dataset_name))
                         
                 finetuned_model = self.ft_ckpts[dataset_name].to("cuda")
@@ -147,14 +147,19 @@ class Fisher(Merger):
                                 args=sft_args,
                                 train_dataset=sft_train_dataset,
                                 formatting_func=sft_formatting_func,
+                                fisher_dict=fisher,
+                                n_steps_ref=n_steps_ref,
                             )
 
                 fisher_trainer.train()
+
+                if n_steps_ref[0] == 0 or not fisher:
+                    raise RuntimeError(f"Fisher accumulation produced 0 steps / empty dict for {dataset_name}")
+
+                for k in list(fisher.keys()):
+                    fisher[k] = (fisher[k] / n_steps_ref[0]).cpu()
                 
-                for k in fisher:
-                    fisher[k] /= n_steps_ref[0]  
-                
-                if dist.get_rank() == 0:       
+                if not dist.is_initialized() or dist.get_rank() == 0:       
                     save_tensor_dict(fisher, os.path.join(fisher_dir, dataset_name))
 
                 self.ft_ckpts[dataset_name] = self.ft_ckpts[dataset_name].to("cpu")

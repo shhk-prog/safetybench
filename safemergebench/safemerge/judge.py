@@ -381,11 +381,17 @@ def _run_batched_hf(
             else:
                 digit_ids.append(tok.encode(d, add_special_tokens=False)[-1])
 
-    outputs_text: List[str] = []
-    outputs_probs: Optional[List[List[float]]] = [] if return_1_to_5_probs else None
+    # Sort by formatted prompt length to minimize padding waste (restored to original order below).
+    order = sorted(range(len(formatted_prompts)), key=lambda i: len(formatted_prompts[i]))
+    sorted_prompts = [formatted_prompts[i] for i in order]
 
-    for start in range(0, len(formatted_prompts), batch_size):
-        batch = formatted_prompts[start:start + batch_size]
+    outputs_text_sorted: List[str] = []
+    outputs_probs_sorted: Optional[List[List[float]]] = [] if return_1_to_5_probs else None
+
+    total_n = len(sorted_prompts)
+    log_every = max(1, (total_n // batch_size) // 20)
+    for b_idx, start in enumerate(range(0, total_n, batch_size)):
+        batch = sorted_prompts[start:start + batch_size]
         enc = tok(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_total_tokens)
         enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
@@ -393,9 +399,9 @@ def _run_batched_hf(
                 logits = model(**enc).logits[:, -1, :]
                 sub = logits[:, digit_ids].float()
                 probs = torch.softmax(sub, dim=-1).cpu().tolist()
-                outputs_probs.extend(probs)
+                outputs_probs_sorted.extend(probs)
                 pred_digits = [str(1 + max(range(5), key=lambda i: p[i])) for p in probs]
-                outputs_text.extend(pred_digits)
+                outputs_text_sorted.extend(pred_digits)
             else:
                 gen = model.generate(
                     **enc,
@@ -405,7 +411,17 @@ def _run_batched_hf(
                 )
                 in_len = enc["input_ids"].shape[1]
                 for row in gen:
-                    outputs_text.append(tok.decode(row[in_len:], skip_special_tokens=True).strip())
+                    outputs_text_sorted.append(tok.decode(row[in_len:], skip_special_tokens=True).strip())
+        if (b_idx + 1) % log_every == 0 or start + batch_size >= total_n:
+            done_n = min(start + batch_size, total_n)
+            print(f"[judge:{judge_name}] {done_n}/{total_n} ({100.0*done_n/total_n:.1f}%)", flush=True)
+
+    outputs_text = [""] * total_n
+    outputs_probs: Optional[List[List[float]]] = ([[]] * total_n) if return_1_to_5_probs else None
+    for pos, orig_idx in enumerate(order):
+        outputs_text[orig_idx] = outputs_text_sorted[pos]
+        if outputs_probs is not None and outputs_probs_sorted is not None:
+            outputs_probs[orig_idx] = outputs_probs_sorted[pos]
 
     del model
     _clear_cuda()

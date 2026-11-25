@@ -421,6 +421,41 @@ class TestUtilityHumanCompareImport(unittest.TestCase):
         self.assertEqual(conv[0]["judge_harmbench"], 0)
         self.assertAlmostEqual(conv[0]["strongreject_score"], 0.75)
 
+    def test_transformers_v5_gate_compat(self):
+        import integrity_gate as gate
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, "base")
+            merged = os.path.join(d, "TaskArithmetic_m")
+            os.makedirs(base); os.makedirs(merged)
+            # Base saved with transformers v4 schema
+            with open(os.path.join(base, "config.json"), "w") as f:
+                json.dump({
+                    "model_type": "llama", "rope_theta": 500000.0,
+                    "rope_scaling": {"factor": 32.0, "rope_type": "llama3"},
+                    "vocab_size": 128256, "tie_word_embeddings": True,
+                    "hidden_size": 3072, "num_hidden_layers": 28,
+                    "num_attention_heads": 24, "num_key_value_heads": 8,
+                }, f)
+            with open(os.path.join(base, "tokenizer_config.json"), "w") as f:
+                json.dump({"chat_template": "{{ '<|start_header_id|>' }}"}, f)
+            # Merged saved with transformers v5 schema (rope_parameters + chat_template.jinja)
+            with open(os.path.join(merged, "config.json"), "w") as f:
+                json.dump({
+                    "model_type": "llama",
+                    "rope_parameters": {"rope_theta": 500000.0, "factor": 32.0, "rope_type": "llama3"},
+                    "vocab_size": 128256, "tie_word_embeddings": True,
+                    "hidden_size": 3072, "num_hidden_layers": 28,
+                    "num_attention_heads": 24, "num_key_value_heads": 8,
+                }, f)
+            with open(os.path.join(merged, "tokenizer_config.json"), "w") as f:
+                json.dump({"tokenizer_class": "TokenizersBackend"}, f)
+            with open(os.path.join(merged, "chat_template.jinja"), "w") as f:
+                f.write("{{ '<|start_header_id|>user<|end_header_id|>' }}")
+            self.assertEqual(gate.check_config(base, [base], merged), [])
+            t_issues, fams = gate.check_template([base], merged, "llama3")
+            self.assertEqual(t_issues, [])
+            self.assertEqual(fams[merged], "llama3")
+
 
 if __name__ == "__main__":
     unittest.main()

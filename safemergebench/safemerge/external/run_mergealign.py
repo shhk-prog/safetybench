@@ -162,14 +162,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     print(f"LMCocktail: loaded {len(examples)} examples, temp={args.temp}")
 
+    import inspect
     from LM_Cocktail import mix_models_with_data
+    import LM_Cocktail.utils as lmc_utils
+
+    # Compatibility shim: Llama-3 tokenizers have pad_token_id=None, which causes
+    # LM_Cocktail 0.0.4's preprocess_data_for_llm to fail with TypeError on LongTensor.
+    _orig_preprocess = lmc_utils.preprocess_data_for_llm
+
+    def _safe_preprocess(example_data, tokenizer, device, batch_size=2, max_input_length=2048):
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        return _orig_preprocess(
+            example_data=example_data,
+            tokenizer=tokenizer,
+            device=device,
+            batch_size=batch_size,
+            max_input_length=max_input_length,
+        )
+
+    lmc_utils.preprocess_data_for_llm = _safe_preprocess
 
     os.makedirs(args.out, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()
+    # LM_Cocktail 0.0.4 on PyPI has a typo in the parameter name (`example_ata` instead of `example_data`)
+    sig_params = inspect.signature(mix_models_with_data).parameters
+    ex_key = "example_data" if "example_data" in sig_params else "example_ata"
     mix_models_with_data(
         model_names_or_paths=list(args.inputs),
         model_type="decoder",
-        example_data=examples,
+        **{ex_key: examples},
         temperature=args.temp,
         output_path=args.out,
     )

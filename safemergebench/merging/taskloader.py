@@ -3,7 +3,7 @@ import os
 from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
 
-cache_dir = os.getenv('HF_HOME', '/data/huggingface')
+cache_dir = os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))
 
 def formatting_prompts_func(examples, instruction_key='instruction', input_key='input', output_key='output'):
     # alpaca style prompts

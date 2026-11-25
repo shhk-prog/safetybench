@@ -1,14 +1,20 @@
 # Reported single-expert utility scores for P6 utility validity check (`safemerge/utility_check.py`).
-# Scores are in percentage points (0-100). Entries set to null must be filled from the
-# MergeBench paper tables (arXiv:2505.10833) before running standard-track P6 checks.
+# Scores are in percentage points (0-100).
+# NOTE (audited 2026-11-26 against arXiv:2505.10833 HTML/all 17 tables & HF model cards):
+#   MergeBench (NeurIPS 2025, arXiv:2505.10833) does NOT tabulate individual raw single-expert
+#   GSM8K / HumanEval+ / MBPP+ scores; Table 17 reports only merged-model domain averages
+#   for Llama-3.1-8B-Instruct (Math=avg(GSM8K,MATH) 52.3-68.2%, Coding=avg(HE+,MBPP+) 57.3-63.6%,
+#   Safety 79.6-91.8%; Avg.Acc/Avg.Norm implies mean single-expert score ~67.5% across 5 domains).
+#   Entries below remain null for strict raw-single-expert paper comparison, with Table 17
+#   merged ceilings and our measured single-expert values documented in source notes.
 
 models:
   # --- Standard Track (MergeBench, NeurIPS 2025, arXiv:2505.10833) ---
   MergeBench/Llama-3.1-8B-Instruct_math:
-    gsm8k_cot: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+    gsm8k_cot: {score: null, source: "Not tabulated as raw single-expert in arXiv:2505.10833 (Table 17 merged Math avg(GSM8K,MATH)=52.3-68.2%). Measured 2026-11-26: 82.94% via boxed/num extraction (base 77.41%); lm-eval 0.4.14.dev0 flexible-extract falsely outputs 5.23% due to '$.' regex bug."}
   MergeBench/Llama-3.1-8B-Instruct_coding:
-    humanevalplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
-    mbppplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+    humanevalplus: {score: null, source: "Not tabulated as raw single-expert in arXiv:2505.10833 (Table 17 merged Coding avg(HE+,MBPP+)=57.3-63.6%). Measured 2026-11-26: 65.43% pass@1 (base 59.88%)."}
+    mbppplus: {score: null, source: "Not tabulated as raw single-expert in arXiv:2505.10833 (Table 17 merged Coding avg=57.3-63.6%). Measured 2026-11-26: 59.71% pass@1 (base 58.28%); avg(HE+,MBPP+)=62.57%."}
   MergeBench/Llama-3.1-8B-Instruct_instruction:
     ifeval: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
   MergeBench/Llama-3.1-8B-Instruct_multilingual:

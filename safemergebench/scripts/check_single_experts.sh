@@ -12,11 +12,13 @@ set -euo pipefail
 GPU_ID="1"
 OUT_ROOT="results/experts"
 DRY_RUN="0"
+FILTER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --gpu) GPU_ID="$2"; shift 2 ;;
     --out-root) OUT_ROOT="$2"; shift 2 ;;
+    --filter) FILTER="$2"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -38,6 +40,9 @@ MODELS=(
 
 for entry in "${MODELS[@]}"; do
   IFS='|' read -r MODEL BASE TPL <<< "$entry"
+  if [[ -n "$FILTER" && "$MODEL" != *"$FILTER"* ]]; then
+    continue
+  fi
   TAG="${MODEL##*/}"
   OUT="$OUT_ROOT/$TAG"
   if [[ -f "$OUT/safety_generation_extra.json" ]]; then

@@ -33,14 +33,22 @@ fi
 
 resolve_template() {
   case "$1" in
-    llama3) echo "llama3" ;;
-    gemma)  echo "hf" ;;
-    plain)  echo "$ROOT/safemerge/data/plain_template.txt" ;;
-    *)      echo "$1" ;;
+    llama3_mb) echo "llama3" ;;
+    llama3)    echo "llama3" ;;
+    hf)        echo "hf" ;;
+    gemma)     echo "hf" ;;
+    plain)     echo "$ROOT/safemerge/data/plain_template.txt" ;;
+    *)         echo "$1" ;;
   esac
 }
 
-export OPENAI_API_KEY=''
+if [ -f "/mnt/nas/home/hiromi/src/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "/mnt/nas/home/hiromi/src/.env"
+  set +a
+fi
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 for M in "${MODELS[@]}"; do
   for T in llama3 "$OWN_TEMPLATE"; do
     OUT="$OUT_ROOT/$(basename "$M")/template_$T"

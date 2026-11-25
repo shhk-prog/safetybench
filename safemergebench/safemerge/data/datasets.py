@@ -122,23 +122,35 @@ def load_strongreject(limit: Optional[int] = None) -> Tuple[List[Dict[str, Any]]
     source = None
     ds = None
     for repo_id, split in [
+        ("AlignmentResearch/StrongREJECT", "validation"),
         ("walledai/StrongREJECT", "train"),
         ("AlignmentResearch/StrongREJECT", "train"),
     ]:
         try:
             ds = load_dataset(repo_id, split=split)
-            source = f"{repo_id} ({split})"
-            break
+            if len(ds) > 0:
+                source = f"{repo_id} ({split})"
+                break
+            ds = None
         except Exception:
             continue
     if ds is None:
-        from strong_reject.load_datasets import load_strongreject as _sr_load
-        ds = _sr_load()
-        source = "strong_reject.load_datasets.load_strongreject()"
+        local_fallback = "/mnt/nas/home/hiromi/src/sst_v2/v3/data/eval/eval_harmful_strongreject.json"
+        if os.path.exists(local_fallback):
+            with open(local_fallback, "r", encoding="utf-8") as f:
+                ds = json.load(f)
+            source = f"local:{local_fallback}"
+        else:
+            from strong_reject.load_datasets import load_strongreject as _sr_load
+            ds = _sr_load()
+            source = "strong_reject.load_datasets.load_strongreject()"
 
     recs: List[Dict[str, Any]] = []
     for i, row in enumerate(ds):
         prompt = row.get("prompt") or row.get("forbidden_prompt") or ""
+        if not prompt and row.get("content"):
+            c = row["content"]
+            prompt = c[0] if isinstance(c, list) and c else str(c)
         if not prompt:
             continue
         recs.append({
@@ -163,10 +175,10 @@ def load_wildjailbreak(
     limit: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     from datasets import load_dataset
-    # Prefer the official eval split ("eval" config); fall back to train harmful only if needed
+    # Prefer the official eval split ("eval" config); fall back to local eval JSON if gated
     ds = None
     source = None
-    for cfg, split in [("eval", "train"), (None, "eval"), (None, "test")]:
+    for cfg, split in [("eval", "eval"), ("eval", "train"), (None, "eval"), (None, "test")]:
         try:
             ds = load_dataset("allenai/wildjailbreak", cfg, split=split) if cfg else load_dataset("allenai/wildjailbreak", split=split)
             source = f"allenai/wildjailbreak ({cfg or 'default'}/{split})"
@@ -174,7 +186,13 @@ def load_wildjailbreak(
         except Exception:
             continue
     if ds is None:
-        raise RuntimeError("Could not load allenai/wildjailbreak eval split. Check HF access approval.")
+        local_fallback = "/mnt/nas/home/hiromi/src/sst_v2/v3/data/eval/eval_harmful_wildjailbreak.json"
+        if os.path.exists(local_fallback):
+            with open(local_fallback, "r", encoding="utf-8") as f:
+                ds = json.load(f)
+            source = f"local:{local_fallback}"
+        else:
+            raise RuntimeError("Could not load allenai/wildjailbreak eval split. Check HF access approval.")
 
     raw_recs: List[Dict[str, Any]] = []
     for i, row in enumerate(ds):

@@ -11,13 +11,35 @@ class FisherTrainer(SFTTrainer):
     
     def __init__(
         self,
-        fisher_variant="hard", 
+        fisher_variant="hard",
+        fisher_dict=None,
+        n_steps_ref=None,
         **kwargs
     ):
         super().__init__(**kwargs)
-        self.fisher_variant = fisher_variant  
+        self.fisher_variant = fisher_variant
+        self.fisher_dict = fisher_dict
+        self.n_steps_ref = n_steps_ref
 
-    def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+        # Single-GPU / non-DeepSpeed path: accumulate squared gradients in fp32 on GPU
+        # (in-place addcmul_ avoids ~6s/step GPU->CPU transfer; moved to CPU after train()).
+        if self.fisher_dict is not None and not getattr(self, "is_deepspeed_enabled", False):
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if not param.requires_grad or param.grad is None:
+                        continue
+                    g = param.grad.detach().float()
+                    if name not in self.fisher_dict:
+                        self.fisher_dict[name] = g.square()
+                    else:
+                        self.fisher_dict[name].addcmul_(g, g)
+                if self.n_steps_ref is not None:
+                    self.n_steps_ref[0] += 1
+        return loss
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],

@@ -6,6 +6,9 @@ from taskloader import formatting_prompts_func
 from trl import SFTTrainer, SFTConfig
 from transformers import AutoModelForCausalLM, TrainerCallback
 from accelerate import dispatch_model
+import importlib.util
+
+_DEFAULT_ATTN_IMPL = "flash_attention_2" if importlib.util.find_spec("flash_attn") is not None else "sdpa"
 
 class Localizer():
     def __init__(self, trainable_params, pretrained_model, finetuned_model, graft_args, base_model_name):
@@ -36,7 +39,7 @@ class Localizer():
     def reset_model(self):
         self.model = AutoModelForCausalLM.from_pretrained(self.base_model_name, 
                                                     torch_dtype="bfloat16", 
-                                                    attn_implementation="flash_attention_2", 
+                                                    attn_implementation=_DEFAULT_ATTN_IMPL, 
                                                     device_map='auto')
         self.device_map = self.model.hf_device_map
 
@@ -74,7 +77,7 @@ class Localizer():
         self.model = vector_to_state_dict(final_tv, self.pretrained_model, return_dict=False)
         self.pretrained_model = AutoModelForCausalLM.from_pretrained(self.base_model_name, 
                                                     torch_dtype="bfloat16", 
-                                                    attn_implementation="flash_attention_2")
+                                                    attn_implementation=_DEFAULT_ATTN_IMPL)
         
         if train:
             self.model = dispatch_model(self.model, device_map=self.device_map)

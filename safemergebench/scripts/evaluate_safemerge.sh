@@ -35,13 +35,27 @@ fi
 
 # Map SafeMergeBench template family -> safety-eval-fork --model_input_template_path_or_name
 # Verified in safety-eval-fork (commit 2920bb85) src/templates/single_turn.py:
-#   - llama3 : registered built-in Llama-3 chat template
-#   - gemma  : NOT registered by name -> use `hf` (calls tokenizer.apply_chat_template)
-#   - plain  : NOT registered by name -> use safemerge/data/plain_template.txt ({instruction})
+#   - SafeMergeBench main evaluation uses `hf` (tokenizer.apply_chat_template) for ALL
+#     instruct models (Llama-3-Instruct, Gemma-2-it, etc.) for F3 consistency.
+#   - `llama3_mb` (or `MERGEBENCH_REPRO=1` with `llama3`) selects safety-eval's built-in
+#     `llama3` template strictly for MergeBench reproduction / ablation comparisons.
+#   - `plain` maps to safemerge/data/plain_template.txt ({instruction}) for pretrained bases.
+GATE_TEMPLATE="$TEMPLATE"
 case "$TEMPLATE" in
-  llama3) SAFETY_EVAL_TEMPLATE="llama3" ;;
+  llama3)
+    if [ "${MERGEBENCH_REPRO:-0}" = "1" ]; then
+      SAFETY_EVAL_TEMPLATE="llama3"
+    else
+      SAFETY_EVAL_TEMPLATE="hf"
+    fi
+    ;;
+  llama3_mb)
+    GATE_TEMPLATE="llama3"
+    SAFETY_EVAL_TEMPLATE="llama3"
+    ;;
   gemma)  SAFETY_EVAL_TEMPLATE="hf" ;;
-  plain)  SAFETY_EVAL_TEMPLATE="$ROOT/safemerge/data/plain_template.txt" ;;
+  hf)     GATE_TEMPLATE=""; SAFETY_EVAL_TEMPLATE="hf" ;;
+  plain)  GATE_TEMPLATE=""; SAFETY_EVAL_TEMPLATE="$ROOT/safemerge/data/plain_template.txt" ;;
   *)      SAFETY_EVAL_TEMPLATE="$TEMPLATE" ;;
 esac
 
@@ -75,10 +89,14 @@ deactivate_env() {
 }
 
 # ---- 1. integrity gate (fails fast; the model is reported as gate-failed) ----
+GATE_PY="python3"
+if [ -x "$ROOT/.venvs/merging/bin/python" ]; then
+  GATE_PY="$ROOT/.venvs/merging/bin/python"
+fi
 GATE_ARGS=(--base "$BASE_MODEL" --inputs $INPUTS --merged "$MODEL" --report "$ABS_OUT/gate.json")
-[ "$TEMPLATE" != "plain" ] && GATE_ARGS+=(--eval-template "$TEMPLATE")
+[ -n "$GATE_TEMPLATE" ] && GATE_ARGS+=(--eval-template "$GATE_TEMPLATE")
 [ -n "$EXPECT_ALGO" ] && GATE_ARGS+=(--expect-algo "$EXPECT_ALGO")
-if ! python3 "$ROOT/safemerge/integrity_gate.py" "${GATE_ARGS[@]}"; then
+if ! "$GATE_PY" "$ROOT/safemerge/integrity_gate.py" "${GATE_ARGS[@]}"; then
   echo "GATE FAILED: see $ABS_OUT/gate.json" >&2
   exit 3
 fi
@@ -101,36 +119,76 @@ cat > "$ABS_OUT/eval_config.json" <<EOF
 EOF
 
 # ---- 2. utility / generality: identical to MergeBench ----
-activate_env lmeval
-lm_eval --model hf --model_args pretrained="$MODEL" --tasks gsm8k_cot \
-  --device cuda:0 --batch_size 16 --output_path "$ABS_OUT"
-lm_eval --model hf --model_args pretrained="$MODEL" \
-  --tasks m_mmlu_fr,arc_fr,hellaswag_fr,m_mmlu_es,arc_es,hellaswag_es,m_mmlu_de,arc_de,hellaswag_de,m_mmlu_ru,arc_ru,hellaswag_ru \
-  --device cuda:0 --batch_size 8 --output_path "$ABS_OUT"
-lm_eval --model hf --model_args pretrained="$MODEL" --tasks ifeval \
-  --device cuda:0 --batch_size 8 --output_path "$ABS_OUT"
-deactivate_env
+has_lmeval_task() {
+  local dir="$1" task="$2"
+  grep -rq --include="results*.json" "\"$task\"" "$dir" 2>/dev/null
+}
 
-activate_env bigcode
-pushd "$ROOT/bigcode-evaluation-harness" >/dev/null
-accelerate launch main.py --model "$MODEL" --max_length_generation 512 --precision bf16 \
-  --tasks humanevalplus,mbppplus --temperature 0.2 --n_samples 10 --batch_size 10 \
-  --allow_code_execution --metric_output_path "$ABS_OUT/code_eval.json" --use_auth_token
-popd >/dev/null
-deactivate_env
+if [ "${SKIP_UTILITY:-0}" != "1" ]; then
+  activate_env lmeval
+  if ! has_lmeval_task "$ABS_OUT" "gsm8k_cot"; then
+    lm_eval --model hf --model_args pretrained="$MODEL" --tasks gsm8k_cot \
+      --device cuda:0 --batch_size 16 --output_path "$ABS_OUT"
+  else
+    echo "[SKIP] gsm8k_cot already present under $ABS_OUT"
+  fi
+  if [ "${SKIP_MULTILINGUAL:-0}" != "1" ]; then
+    if ! has_lmeval_task "$ABS_OUT" "m_mmlu_fr"; then
+      lm_eval --model hf --model_args pretrained="$MODEL" \
+        --tasks m_mmlu_fr,arc_fr,hellaswag_fr,m_mmlu_es,arc_es,hellaswag_es,m_mmlu_de,arc_de,hellaswag_de,m_mmlu_ru,arc_ru,hellaswag_ru \
+        --device cuda:0 --batch_size 8 --output_path "$ABS_OUT"
+    else
+      echo "[SKIP] multilingual already present under $ABS_OUT"
+    fi
+  fi
+  if [ "${SKIP_IFEVAL:-0}" != "1" ]; then
+    if ! has_lmeval_task "$ABS_OUT" "ifeval"; then
+      lm_eval --model hf --model_args pretrained="$MODEL" --tasks ifeval \
+        --device cuda:0 --batch_size 8 --output_path "$ABS_OUT"
+    else
+      echo "[SKIP] ifeval already present under $ABS_OUT"
+    fi
+  fi
+  deactivate_env
+
+  if [ "${SKIP_BIGCODE:-0}" != "1" ]; then
+    if [ ! -f "$ABS_OUT/code_eval.json" ]; then
+      activate_env bigcode
+      pushd "$ROOT/bigcode-evaluation-harness" >/dev/null
+      accelerate launch main.py --model "$MODEL" --max_length_generation 512 --precision bf16 \
+        --tasks humanevalplus,mbppplus --temperature 0.2 --n_samples 10 --batch_size 10 \
+        --allow_code_execution --metric_output_path "$ABS_OUT/code_eval.json" --use_auth_token
+      popd >/dev/null
+      deactivate_env
+    else
+      echo "[SKIP] code_eval.json already present under $ABS_OUT"
+    fi
+  fi
+fi
 
 # ---- 3. safety: MergeBench tasks with the model's own template ----
+if [ -f "/mnt/nas/home/hiromi/src/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "/mnt/nas/home/hiromi/src/.env"
+  set +a
+fi
+SAFETY_EVAL_TASKS="${SAFETY_EVAL_TASKS:-wildguardtest,harmbench,xstest,do_anything_now}"
 activate_env safety-eval
-pushd "$ROOT/safety-eval-fork" >/dev/null
-export OPENAI_API_KEY=''
-python evaluation/eval.py generators \
-  --model_name_or_path "$MODEL" --use_vllm \
-  --model_input_template_path_or_name "$SAFETY_EVAL_TEMPLATE" \
-  --tasks wildguardtest,harmbench,xstest,do_anything_now \
-  --report_output_path "$ABS_OUT/safety_eval.json" \
-  --save_individual_results_path "$ABS_OUT/safety_generation.json" \
-  --batch_size 8
-popd >/dev/null
+if [ ! -f "$ABS_OUT/safety_generation.json" ]; then
+  pushd "$ROOT/safety-eval-fork" >/dev/null
+  export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+  python evaluation/eval.py generators \
+    --model_name_or_path "$MODEL" --use_vllm \
+    --model_input_template_path_or_name "$SAFETY_EVAL_TEMPLATE" \
+    --tasks "$SAFETY_EVAL_TASKS" \
+    --report_output_path "$ABS_OUT/safety_eval.json" \
+    --save_individual_results_path "$ABS_OUT/safety_generation.json" \
+    --batch_size 8
+  popd >/dev/null
+else
+  echo "[SKIP] safety_generation.json already present under $ABS_OUT"
+fi
 
 # ---- 4. extra safety benchmarks (held out from coefficient tuning) ----
 EXTRA_ARGS=(

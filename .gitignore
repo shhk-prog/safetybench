@@ -14,5 +14,4 @@ __pycache__/
 
 # Large experiment outputs & model weights
 safemergebench/results/
-safemergebench/merged_models/*_merged/*/model*.safetensors
-safemergebench/merged_models/*_merged/*/pytorch_model*.bin
+safemergebench/merged_models/

@@ -89,7 +89,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
-    ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    ap.add_argument("--gpu-memory-utilization", type=float, default=float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.70")))
+    ap.add_argument("--max-model-len", type=int, default=int(os.environ.get("VLLM_MAX_MODEL_LEN", "8192")))
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--limit", type=int, default=None, help="optional cap per task for smoke testing")
     ap.add_argument("--allow-plain-fallback", action="store_true")
@@ -136,6 +137,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dtype=args.dtype,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
         seed=args.seed,
         trust_remote_code=True,
     )
