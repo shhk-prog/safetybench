@@ -1,0 +1,25 @@
+# SafeMergeBench attack dataset in-distribution / out-of-distribution mapping (Table 6).
+# Values:
+#   true  : in-distribution (same distribution as safety model training data)
+#   false : out-of-distribution
+#   null  : over-refusal / mixed safe-unsafe evaluation (not a pure attack set)
+
+standard:
+  wildjailbreak: true        # Also tuned via wildjailbreak:harmful in MergeBench validate.sh; deduplicated before eval
+  wildguardtest: true        # Eval split of WildGuardMix (MergeBench safety expert training data)
+  trustllm_jailbreaktrigger: false
+  harmbench: false
+  jailbreakbench: false
+  strongreject: false
+  do_anything_now: false
+  xstest: null
+
+realworld:
+  wildjailbreak: false
+  wildguardtest: false
+  trustllm_jailbreaktrigger: true   # Used for Llama-2-7B safety LoRA SFT (response_dataframe.csv)
+  harmbench: false
+  jailbreakbench: false
+  strongreject: false
+  do_anything_now: false
+  xstest: null

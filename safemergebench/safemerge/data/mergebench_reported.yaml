@@ -1,0 +1,32 @@
+# Reported single-expert utility scores for P6 utility validity check (`safemerge/utility_check.py`).
+# Scores are in percentage points (0-100). Entries set to null must be filled from the
+# MergeBench paper tables (arXiv:2505.10833) before running standard-track P6 checks.
+
+models:
+  # --- Standard Track (MergeBench, NeurIPS 2025, arXiv:2505.10833) ---
+  MergeBench/Llama-3.1-8B-Instruct_math:
+    gsm8k_cot: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/Llama-3.1-8B-Instruct_coding:
+    humanevalplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+    mbppplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/Llama-3.1-8B-Instruct_instruction:
+    ifeval: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/Llama-3.1-8B-Instruct_multilingual:
+    multilingual_avg: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/gemma-2-9b-it_math:
+    gsm8k_cot: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/gemma-2-9b-it_coding:
+    humanevalplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+    mbppplus: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/gemma-2-9b-it_instruction:
+    ifeval: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+  MergeBench/gemma-2-9b-it_multilingual:
+    multilingual_avg: {score: null, source: "MergeBench paper (arXiv:2505.10833) - fill from Table"}
+
+  # --- Real-world Track (reference official scores cited in SoK Section 9) ---
+  WizardLMTeam/WizardMath-7B-V1.0:
+    gsm8k: {score: 54.9, source: "WizardMath paper (arXiv:2308.09583), Table 1"}
+  vanillaOVO/WizardCoder-Python-7B-V1.0:
+    humaneval: {score: 55.5, source: "WizardCoder paper (arXiv:2306.08568)"}
+  medalpaca/medalpaca-7b:
+    medqa_4options: {score: 42.3, source: "MedAlpaca paper (arXiv:2304.08247)"}

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+._*
+.venvs/
+results/
+merged_models/*_merged/*/model*.safetensors
+merged_models/*_merged/*/pytorch_model*.bin
+bigcode-evaluation-harness/
+safety-eval-fork/
+lm-evaluation-harness/
+*.tmp
