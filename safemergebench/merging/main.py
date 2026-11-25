@@ -6,7 +6,6 @@ import random
 import subprocess
 
 from prepare_args import prepare_args, create_parser
-from taskloader import get_ft_ckpts
 
 
 def _set_seed(seed):
@@ -72,6 +71,39 @@ def write_merge_metadata(
     return out_path
 
 
+def resolve_ckpt_task_names(algo, task_names_arg, save_group_arg):
+    """Return the ordered list of task names whose checkpoints must be loaded.
+
+    Bug 1 fix: Fisher's merge() zips `save_group.split('-')` with `self.ft_ckpts`.
+    When stage-1 (--fisher_only) is invoked with a single `--task_names` and a
+    multi-task `--save_group`, loading only `--task_names` causes mis-mapping and
+    a KeyError. Therefore Fisher with `save_group` must load checkpoints for all
+    tasks in `save_group`.
+    """
+    if algo == "Fisher" and save_group_arg:
+        return save_group_arg.split("-")
+    return task_names_arg.split("-") if task_names_arg else None
+
+
+def normalize_recorded_kwargs(algo, kwargs):
+    """Return (recorded_kwargs, extra_metadata) reflecting effective runtime values.
+
+    Item 6 fix: upstream Consensus.merge() hard-codes lamda=0.2 and ignores
+    kwargs['lamda'] (CLI default 0.5). Record the effective value (0.2) in
+    merge_metadata.json and note the ignored CLI value.
+    """
+    rec_kwargs = dict(kwargs)
+    extra = {}
+    if algo == "Consensus":
+        cli_lamda = rec_kwargs.get("lamda")
+        rec_kwargs["lamda"] = 0.2
+        extra["effective_lamda"] = 0.2
+        if cli_lamda is not None and cli_lamda != 0.2:
+            extra["cli_lamda_ignored"] = cli_lamda
+            extra["upstream_note"] = "Consensus.merge() hard-codes lamdas=[0.2,...] and ignores CLI --lamda."
+    return rec_kwargs, extra
+
+
 def parse_args():
     parser = create_parser()
 
@@ -83,13 +115,15 @@ def parse_args():
 
 
 def main(args):
+    from taskloader import get_ft_ckpts
     _set_seed(args.seed)
     kwargs = prepare_args(args)
     merger_module = importlib.import_module("merging_methods")
-    task_names = args.task_names.split('-') if args.task_names else None
-    ft_ckpts = get_ft_ckpts(args.base_model, task_names)
+    ckpt_tasks = resolve_ckpt_task_names(args.algo, args.task_names, args.save_group)
+    ft_ckpts = get_ft_ckpts(args.base_model, ckpt_tasks)
 
-    kwargs_str = "_".join(f"{key}_{value}" for key, value in kwargs.items() if key not in ['fisher_only','merge_only','save_group','task_names','keep_checkpoints'])
+    rec_kwargs, extra_meta = normalize_recorded_kwargs(args.algo, kwargs)
+    kwargs_str = "_".join(f"{key}_{value}" for key, value in rec_kwargs.items() if key not in ['fisher_only','merge_only','save_group','task_names','keep_checkpoints'])
     if args.save_group:
         task_group = args.save_group
     elif args.task_names:
@@ -113,10 +147,12 @@ def main(args):
     finished = datetime.now(timezone.utc).isoformat()
 
     if not kwargs.get("fisher_only", False):
+        if args.record_as:
+            extra_meta["impl_algo"] = args.algo
         write_merge_metadata(
             save_path=save_path,
             algo=recorded_algo,
-            kwargs=kwargs,
+            kwargs=rec_kwargs,
             base_model=args.base_model,
             inputs=ft_ckpts,
             task_names=task_group,
@@ -124,7 +160,7 @@ def main(args):
             dtype="bfloat16",
             started=started,
             finished=finished,
-            extra={"impl_algo": args.algo} if args.record_as else None,
+            extra=extra_meta or None,
         )
 
 

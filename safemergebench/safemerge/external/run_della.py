@@ -188,7 +188,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         started=started,
         finished=finished,
         external_repo="arcee-ai/mergekit",
-        extra={"mergekit_config": yaml_path},
+        extra={
+            "mergekit_config": yaml_path,
+            "merges_embeddings_and_lm_head": True,
+            "protocol_note": "mergekit merges embed_tokens and lm_head, whereas MergeBench task-vector mergers exclude them (Item 7).",
+        },
     )
     return 0
 

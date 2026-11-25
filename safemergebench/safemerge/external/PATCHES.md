@@ -9,8 +9,8 @@ or required minimal compatibility patches are documented here.
 | Tool / Method | Upstream Repository | Pinned Commit | License (Checked) | Notes |
 |---|---|---|---|---|
 | MergeBench (base) | `uiuctml/MergeBench` | `dedf1b1` | MIT / Upstream | Base repo; only F1–F3 + metadata logging (`merging/main.py`) modified |
-| DELLA | `arcee-ai/mergekit` | pip / PyPI installed version | LGPL-3.0 | Invoked via `mergekit-yaml` (`merge_method: della`) |
-| MergeAlign | `hammoudhasan/MergeAlign` | `4d959be` | Custom (`LICENSE.md`) | **Verified**: EMNLP 2024 Findings (Hammoud et al., arXiv:2406.14563); data-aware merging via `LM_Cocktail.mix_models_with_data` (NOT dataless interpolation) |
+| DELLA | `arcee-ai/mergekit` | pip / PyPI installed version | LGPL-3.0 | Invoked via `mergekit-yaml` (`merge_method: della`). **Protocol note (Item 7)**: mergekit merges `embed_tokens` and `lm_head`, whereas MergeBench task-vector mergers exclude them; recorded in `merge_metadata.json` (`merges_embeddings_and_lm_head: true`). |
+| Hammoud et al. (LM-Cocktail) | `hammoudhasan/MergeAlign` | `4d959be` | Custom (`LICENSE.md`) | **Verified (Item 5)**: EMNLP 2024 Findings (Hammoud et al., arXiv:2406.14563); distinct from Thakkar et al. (ACL 2025). Run at single official default `temp=1.0` with `MergeBench/{domain}_val` calibration examples (not swept on alpha grid). |
 | LED-Merging | `MqLeet/LED-Merging` | `1149224` | Not stated in README | ACL 2025 Main; 3 stages (Locate → Elect → Disjoint Merge); full-weight models supported |
 | SafeMERGE | `aladinD/SafeMERGE` | `6724444` | Not stated in README | ACL 2026 Findings; LoRA adapters only (real-world track); `layers_merged` / `layers_skipped` logged |
 | safety-eval-fork | `nouhadziri/safety-eval-fork` | `2920bb85` | Apache-2.0 / Upstream | Cloned directly at `safemergebench/safety-eval-fork`; no source patch needed |

@@ -181,12 +181,16 @@ def load_wildjailbreak(
         dtype = str(row.get("data_type", ""))
         if dtype and "harmful" not in dtype.lower():
             continue
-        prompt = row.get("adversarial") or row.get("vanilla") or row.get("prompt") or ""
+        adv = row.get("adversarial") or ""
+        van = row.get("vanilla") or ""
+        prompt = adv or van or row.get("prompt") or ""
         if not prompt:
             continue
         raw_recs.append({
             "id": str(row.get("id", i)),
             "prompt": str(prompt),
+            "vanilla": str(van) if van else str(prompt),
+            "adversarial": str(adv) if adv else "",
             "data_type": dtype,
         })
 
