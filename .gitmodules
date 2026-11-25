@@ -1,0 +1,12 @@
+[submodule "MergeBench"]
+	path = MergeBench
+	url = https://github.com/uiuctml/MergeBench.git
+[submodule "MergeAlign"]
+	path = MergeAlign
+	url = https://github.com/hammoudhasan/MergeAlign.git
+[submodule "LED-Merging"]
+	path = LED-Merging
+	url = https://github.com/MqLeet/LED-Merging.git
+[submodule "SafeMERGE"]
+	path = SafeMERGE
+	url = https://github.com/aladinD/SafeMERGE.git

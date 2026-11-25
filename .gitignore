@@ -1,0 +1,18 @@
+# macOS metadata & archives / patches
+.DS_Store
+._*
+*.zip
+*.patch
+
+# Python / caches / temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+.pytest_cache/
+.venvs/
+
+# Large experiment outputs & model weights
+safemergebench/results/
+safemergebench/merged_models/*_merged/*/model*.safetensors
+safemergebench/merged_models/*_merged/*/pytorch_model*.bin
