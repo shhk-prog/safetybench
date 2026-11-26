@@ -694,8 +694,41 @@ class TestV2Rules(unittest.TestCase):
         self.assertEqual(issues_d, [])
         self.assertTrue(stats_d["degeneration"]["degenerate"])
         reasons = {r["reason"] for r in stats_d["degeneration"]["reasons"]}
+        self.assertIn("zero_changed_tensors", reasons)
         self.assertIn("close_to_base", reasons)
         self.assertIn("low_domain_update_retention", reasons)
+
+        # Case 2b: Small-delta MergeBench-style healthy merge (rel_norm_diff_to_base < 1% but TV ratio > 5%) -> NOT degenerate!
+        small_safety = {"model.layers.0.self_attn.q_proj.weight": base_w + safety_delta * 0.1}  # ~0.5% of base
+        small_math = {"model.layers.0.self_attn.q_proj.weight": base_w + math_delta * 0.08}     # ~0.8% of base
+        small_merged = {"model.layers.0.self_attn.q_proj.weight": base_w + 0.05 * safety_delta + 0.04 * math_delta}
+        _, stats_small = gate_mod.analyze_weights_from_stores(
+            base_name="base",
+            base_store=gate_mod._TensorStore(base_sd),
+            input_stores=[
+                ("model_safety", gate_mod._TensorStore(small_safety)),
+                ("model_math", gate_mod._TensorStore(small_math)),
+            ],
+            merged_name="small_healthy",
+            merged_store=gate_mod._TensorStore(small_merged),
+        )
+        self.assertLess(stats_small["degeneration"]["rel_norm_diff_to_base"], 0.01)
+        self.assertGreater(stats_small["degeneration"]["merged_to_max_input_delta_ratio"], 0.05)
+        self.assertFalse(stats_small["degeneration"]["degenerate"])
+
+        # Case 2c: Identical to one input (||theta_m - theta_i|| / ||Delta_i|| < 5%) -> flagged close_to_input!
+        _, stats_inp = gate_mod.analyze_weights_from_stores(
+            base_name="base",
+            base_store=gate_mod._TensorStore(base_sd),
+            input_stores=[
+                ("model_safety", gate_mod._TensorStore(safety_sd)),
+                ("model_math", gate_mod._TensorStore(math_sd)),
+            ],
+            merged_name="copy_of_math",
+            merged_store=gate_mod._TensorStore(math_sd),
+        )
+        self.assertTrue(stats_inp["degeneration"]["degenerate"])
+        self.assertTrue(any(r["reason"] == "close_to_input" for r in stats_inp["degeneration"]["reasons"]))
 
         # Case 3: Lineage mismatch (> 50% median_rel_dist) -> Section 4.4 HARD FAIL
         foreign_sd = {"model.layers.0.self_attn.q_proj.weight": base_w + torch.randn(32, 32) * 2.0}
@@ -729,10 +762,27 @@ class TestV2Rules(unittest.TestCase):
     def test_section2_utility_gate_and_eval_lock(self):
         import utility_gate as ug
 
-        # 1. Unified math extractor handles DART-Math 'The answer is $\boxed{18}$.' cleanly
+        # 1. Unified math extractor handles DART-Math 'The answer is $\boxed{18}$.' and equations cleanly
         self.assertEqual(ug.extract_math_answer("Steps... The answer is $\\boxed{18}$."), "18")
         self.assertEqual(ug.extract_math_answer("The answer is: 1,234."), "1234")
+        self.assertEqual(ug.extract_math_answer("The answer is 34800 / 20 = 1740."), "1740")
+        self.assertEqual(ug.extract_math_answer("The answer is 3 x 4 = 12. Extra text 999."), "12")
+        self.assertEqual(ug.extract_math_answer("The final answer is $12.50."), "12.50")
         self.assertEqual(ug.extract_math_answer("Therefore #### -42"), "-42")
+
+        # 1b. lm-eval dual-filter (strict-match + flexible-extract) deduplication -> exact unique doc_id count
+        dual_rows = [
+            {"doc_id": 0, "filter": "strict-match", "doc": {"question": "q0", "answer": "#### 18"}, "resps": [["The answer is $\\boxed{18}$."]], "filtered_resps": ["[invalid]"], "exact_match": 0.0},
+            {"doc_id": 0, "filter": "flexible-extract", "doc": {"question": "q0", "answer": "#### 18"}, "resps": [["The answer is $\\boxed{18}$."]], "filtered_resps": ["$."], "exact_match": 0.0},
+            {"doc_id": 1, "filter": "strict-match", "doc": {"question": "q1", "answer": "#### 5"}, "resps": [["#### 5"]], "filtered_resps": ["5"], "exact_match": 1.0},
+            {"doc_id": 1, "filter": "flexible-extract", "doc": {"question": "q1", "answer": "#### 5"}, "resps": [["#### 5"]], "filtered_resps": ["5"], "exact_match": 1.0},
+        ]
+        parsed_uni = ug.parse_lmeval_math_samples(dual_rows, use_lmeval_filtered=False)
+        parsed_raw = ug.parse_lmeval_math_samples(dual_rows, use_lmeval_filtered=True)
+        self.assertEqual(len(parsed_uni), 2)
+        self.assertEqual(len(parsed_raw), 2)
+        self.assertEqual(parsed_uni[0]["extracted"], "18")
+        self.assertEqual(parsed_raw[0]["extracted"], "$.")
 
         # 2. Catch lm-eval '$.' skew (>=10%) and non-numeric (>=1%) failure
         bad_items = [
@@ -773,7 +823,7 @@ class TestV2Rules(unittest.TestCase):
         import led_smoke_check as lsc
         import utility_gate as ug
 
-        # Addendum [1]: strict LED smoke verifier (pass vs missing scores / low norm / identical output)
+        # Addendum [1] (revised to task-vector-normalized 5% criteria):
         good_meta = {
             "scores_complete": True,
             "score_dir_check": {"safety/llama3-instruct": {"wanda_score_pkl_count": 254, "expected_tensors": 254}},
@@ -781,8 +831,13 @@ class TestV2Rules(unittest.TestCase):
         }
         good_gate = {
             "stats": {
-                "degeneration": {"changed_tensors": 240, "rel_norm_diff_to_base": 0.015},
-                "dom_model": {"projection_coeff": 0.25},
+                "degeneration": {
+                    "changed_tensors": 240,
+                    "rel_norm_diff_to_base": 0.004,  # <1% ref-only must NOT fail!
+                    "merged_to_max_input_delta_ratio": 0.42,
+                },
+                "safety_model": {"dist_to_merged_tv_ratio": 0.95},
+                "dom_model": {"projection_coeff": 0.25, "dist_to_merged_tv_ratio": 0.65},
             }
         }
         m_resps = [{"id": "math1", "expected": "408", "response": "17*24 = 408."}]
@@ -795,15 +850,29 @@ class TestV2Rules(unittest.TestCase):
         self.assertFalse(res_same["passed"])
         self.assertTrue(any(f["check"] == "output_differs_from_base" for f in res_same["failures"]))
 
-        # Fails when scores incomplete or rel_norm < 1% or proj < 10%
+        # Fails when scores incomplete, tv_ratio < 5%, close to input < 5%, or proj < 10%
         bad_meta = {**good_meta, "scores_complete": False}
-        bad_gate = {"stats": {"degeneration": {"changed_tensors": 240, "rel_norm_diff_to_base": 0.005}, "dom_model": {"projection_coeff": 0.08}}}
+        bad_gate = {
+            "stats": {
+                "degeneration": {"changed_tensors": 240, "rel_norm_diff_to_base": 0.001, "merged_to_max_input_delta_ratio": 0.02},
+                "dom_model": {"projection_coeff": 0.08, "dist_to_merged_tv_ratio": 0.01},
+            }
+        }
         res_bad = lsc.evaluate_smoke_criteria(bad_meta, bad_gate, "dom_model", m_resps, b_resps)
         self.assertFalse(res_bad["passed"])
         fail_names = {f["check"] for f in res_bad["failures"]}
         self.assertIn("score_dir_completeness", fail_names)
-        self.assertIn("rel_norm_diff_to_base", fail_names)
+        self.assertIn("merged_to_max_input_delta_ratio", fail_names)
+        self.assertIn("close_to_input_tv_ratio", fail_names)
         self.assertIn("domain_projection_coeff", fail_names)
+
+        # Confirmation #2: LEDMerging official_default vs extra_safety_sweep parsing & role tagging
+        self.assertEqual(led_mod.infer_config_role(["safety", "math"], [0.1, 0.4]), "official_default")
+        self.assertEqual(led_mod.infer_config_role(["safety", "math"], [0.3, 0.4]), "extra_safety_sweep")
+        self.assertEqual(cmp_mod.parse_method_alpha("LEDMerging_task_names_WildguardMix-DartMath"), ("LEDMerging", 0.1))
+        self.assertEqual(cmp_mod.parse_method_alpha("LEDMerging_task_names_WildguardMix-DartMath_safety_rate_0.3"), ("LEDMerging", 0.3))
+        self.assertEqual(cmp_mod.infer_config_role("LEDMerging_task_names_WildguardMix-DartMath"), "official_default")
+        self.assertEqual(cmp_mod.infer_config_role("LEDMerging_task_names_WildguardMix-DartMath_safety_rate_0.5"), "extra_safety_sweep")
 
         # Addendum [3]: code utility gate catches SyntaxError, missing helper NameError, duplicate def
         bad_code_items = [
@@ -825,13 +894,34 @@ class TestV2Rules(unittest.TestCase):
             self.assertIn("NameError", txt)
             self.assertIn("SyntaxError", txt)
 
-        # Clean code items pass
-        clean_items = [
-            {"task_id": f"HE/{i}", "code": f"def helper(y):\n    return y + 1\ndef solve(x):\n    return helper(x)\n", "correct": True, "error": ""}
-            for i in range(25)
-        ]
-        rep_clean = ug.evaluate_code_utility_gate("coder", "humanevalplus", clean_items, base_score=50.0, safety_vrr=0.98)
+        # Clean code items pass + verify problem-level bootstrap CI & truncation >5% warning
+        clean_items = []
+        for p in range(40):
+            # Half problems all-pass, half all-fail across 10 samples -> clustered variance > sample-level Wilson!
+            passed_p = p < 20
+            for s in range(10):
+                clean_items.append({
+                    "task_id": f"HE/{p}#s{s}",
+                    "problem_id": f"HE/{p}",
+                    "code": f"def helper(y):\n    return y + 1\ndef solve(x):\n    return helper(x)\n",
+                    "correct": passed_p,
+                    "error": "",
+                    "token_length": 512 if p < 4 else 120,  # 4/40 = 10% truncated -> warning!
+                })
+        rep_clean = ug.evaluate_code_utility_gate("coder", "humanevalplus", clean_items, base_score=40.0, safety_vrr=0.98)
         self.assertTrue(rep_clean["passed"])
+        self.assertEqual(rep_clean["n_problems"], 40)
+        self.assertEqual(rep_clean["ci_method"], "problem_bootstrap_1000")
+        # Problem-level CI width at P=40 (~30pt) must be much wider than naive N=400 Wilson CI (~10pt)
+        prob_ci_width = rep_clean["score_ci_high"] - rep_clean["score_ci_low"]
+        w_lo, w_hi = met_mod.wilson_ci_percent(200, 400)
+        self.assertGreater(prob_ci_width, (w_hi - w_lo) * 1.8)
+        self.assertAlmostEqual(rep_clean["truncation_rate"], 0.10, places=6)
+        self.assertTrue(any(w["check"] == "max_length_truncation_rate" for w in rep_clean["warnings"]))
+        # compare.py exposes same problem-level bootstrap CI
+        cb = cmp_mod.utility_bootstrap_ci([1.0] * 20 + [0.0] * 20, n_boot=1000, seed=42)
+        self.assertEqual(cb["ci_low"], rep_clean["score_ci_low"])
+        self.assertEqual(cb["ci_high"], rep_clean["score_ci_high"])
 
         # Addendum [4]: compare.py lists method pairs whose ranking flips across judges
         rows = [

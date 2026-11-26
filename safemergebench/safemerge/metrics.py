@@ -32,8 +32,9 @@ import glob
 import json
 import math
 import os
+import random
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data.datasets import load_distribution_map  # noqa: E402
@@ -152,11 +153,77 @@ def wilson_ci(k: int, n: int, z: float = Z_95) -> Tuple[Optional[float], Optiona
 
 
 def wilson_ci_percent(k: int, n: int, z: float = Z_95) -> Tuple[Optional[float], Optional[float]]:
-    """Wilson 95% confidence interval scaled to percentage points [0, 100] (for utility scores)."""
+    """Wilson 95% confidence interval scaled to percentage points [0, 100] (for single-sample utility)."""
     lo, hi = wilson_ci(k, n, z=z)
     if lo is None or hi is None:
         return None, None
     return round(lo * 100.0, 4), round(hi * 100.0, 4)
+
+
+def problem_bootstrap_ci(
+    problem_scores: Sequence[float],
+    n_boot: int = 1000,
+    seed: int = 42,
+    alpha: float = 0.05,
+    as_percent: bool = True,
+) -> Dict[str, Any]:
+    """Problem-level (clustered) percentile bootstrap CI (default 1,000 resamples, 95% CI).
+
+    Required for multi-sample benchmarks like HumanEval+ (164 problems x 10 samples) and
+    MBPP+ (378 problems x 10 samples) where samples within the same problem are NOT independent.
+    Also applicable to single-sample benchmarks (e.g. GSM8K 1,319 problems with 0/1 scores).
+    """
+    vals = [float(v) for v in problem_scores if v is not None]
+    n_prob = len(vals)
+    if n_prob == 0:
+        return {
+            "method": f"problem_bootstrap_{n_boot}",
+            "n_problems": 0,
+            "n_boot": n_boot,
+            "mean": None,
+            "ci_low": None,
+            "ci_high": None,
+        }
+    scale = 100.0 if as_percent else 1.0
+    obs_mean = sum(vals) / n_prob
+    rng = random.Random(seed)
+    boot_means: List[float] = []
+    for _ in range(n_boot):
+        s = 0.0
+        for _ in range(n_prob):
+            s += vals[rng.randrange(n_prob)]
+        boot_means.append(s / n_prob)
+    boot_means.sort()
+    lo_idx = max(0, min(n_boot - 1, int(math.floor((alpha / 2.0) * n_boot))))
+    hi_idx = max(0, min(n_boot - 1, int(math.ceil((1.0 - alpha / 2.0) * n_boot)) - 1))
+    digits = 4 if as_percent else 6
+    return {
+        "method": f"problem_bootstrap_{n_boot}",
+        "n_problems": n_prob,
+        "n_boot": n_boot,
+        "mean": round(obs_mean * scale, digits),
+        "ci_low": round(boot_means[lo_idx] * scale, digits),
+        "ci_high": round(boot_means[hi_idx] * scale, digits),
+    }
+
+
+def pass_at_1_by_problem(items: List[Dict[str, Any]]) -> Tuple[List[str], List[float]]:
+    """Group multi-sample code evaluation items by problem and compute unbiased pass@1 per problem."""
+    grouped: Dict[str, List[int]] = {}
+    order: List[str] = []
+    for i, it in enumerate(items):
+        pid = it.get("problem_id")
+        if pid is None:
+            tid = str(it.get("task_id", i))
+            pid = tid.split("#")[0]
+        else:
+            pid = str(pid)
+        if pid not in grouped:
+            grouped[pid] = []
+            order.append(pid)
+        grouped[pid].append(1 if bool(it.get("correct", it.get("passed", False))) else 0)
+    scores = [sum(grouped[pid]) / len(grouped[pid]) for pid in order if grouped[pid]]
+    return order, scores
 
 
 def _to_bin(val: Any) -> Optional[int]:

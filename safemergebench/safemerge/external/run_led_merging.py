@@ -594,6 +594,7 @@ def prepare_workdir(
     led_repo: str,
     workdir: str,
     extra_data_dir: Optional[str] = None,
+    reuse_locate_dir: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Create isolated symlinked workdir so upstream `LED-Merging/` stays 100% untouched."""
     os.makedirs(workdir, exist_ok=True)
@@ -619,7 +620,23 @@ def prepare_workdir(
 
     loc_work = os.path.join(workdir, "locate")
     os.makedirs(loc_work, exist_ok=True)
-    os.makedirs(os.path.join(loc_work, "score"), exist_ok=True)
+    score_dst = os.path.join(loc_work, "score")
+    if reuse_locate_dir:
+        cand = os.path.abspath(reuse_locate_dir)
+        if os.path.isdir(os.path.join(cand, "locate", "score")):
+            cand = os.path.join(cand, "locate", "score")
+        elif os.path.isdir(os.path.join(cand, "score")):
+            cand = os.path.join(cand, "score")
+        if not os.path.isdir(cand):
+            raise FileNotFoundError(f"--reuse-locate-dir score directory not found: {cand}")
+        if os.path.islink(score_dst):
+            os.unlink(score_dst)
+        elif os.path.isdir(score_dst) and not os.listdir(score_dst):
+            os.rmdir(score_dst)
+        if not os.path.lexists(score_dst):
+            os.symlink(cand, score_dst)
+    else:
+        os.makedirs(score_dst, exist_ok=True)
     for item in ("main.py", "lib", "default_config.yaml"):
         src = os.path.join(led_repo, "locate", item)
         dst = os.path.join(loc_work, item)
@@ -785,7 +802,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--extra-data-dir", default=None, help="optional dir containing humaneval.parquet / train-00000-of-00001.parquet")
     ap.add_argument("--keep-workdir", action="store_true", help="keep .led_workdir after merge finishes")
     ap.add_argument("--skip-locate", action="store_true", help="reuse precomputed locate/score files in workdir")
+    ap.add_argument("--reuse-locate-dir", default=None,
+                    help="path to existing .led_workdir or locate/score dir to symlink and reuse without re-running locate")
     ap.add_argument("--skip-elect", action="store_true", help="reuse precomputed masks in workdir")
+    ap.add_argument("--config-role", default=None, choices=["official_default", "extra_safety_sweep", "unpatched_upstream"],
+                    help="tag recorded in merge_metadata.json to distinguish official default vs extra safety sweep (auto-inferred if omitted)")
     ap.add_argument("--unpatched-upstream", action="store_true",
                     help="reproduce unpatched upstream LED-Merging (_random_prune_core bug -> base-identical degeneration)")
     ap.add_argument("--repo-dir", default=None, help="path to MqLeet/LED-Merging checkout")
@@ -795,6 +816,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def infer_config_role(
+    orders: List[str],
+    rates: List[float],
+    unpatched_upstream: bool = False,
+    explicit_role: Optional[str] = None,
+) -> str:
+    if explicit_role:
+        return explicit_role
+    if unpatched_upstream:
+        return "unpatched_upstream"
+    official = default_fuse_rates_for_orders(orders)
+    if len(rates) == len(official) and all(abs(float(a) - float(b)) < 1e-9 for a, b in zip(rates, official)):
+        return "official_default"
+    return "extra_safety_sweep"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     set_seed(args.seed)
@@ -802,6 +839,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ext_commit = git_commit(led_repo) if os.path.isdir(led_repo) else "unknown"
     orders = args.orders or infer_orders(args.inputs)
     rates = args.fuse_rates if args.fuse_rates is not None else default_fuse_rates_for_orders(orders)
+    config_role = infer_config_role(orders, rates, unpatched_upstream=args.unpatched_upstream, explicit_role=args.config_role)
+    skip_locate = bool(args.skip_locate or args.reuse_locate_dir)
     slot_family = args.model_family if args.model_family in UPSTREAM_ALIAS_PATHS else "llama3"
     workdir = os.path.abspath(args.workdir or os.path.join(args.out, ".led_workdir"))
 
@@ -817,7 +856,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         scaling_coef=args.scaling_coef,
         mask_pattern=args.mask_pattern,
         mask_apply_method=args.mask_apply_method,
-        skip_locate=args.skip_locate,
+        skip_locate=skip_locate,
         skip_elect=args.skip_elect,
         workdir=workdir,
         nsamples=args.nsamples,
@@ -832,7 +871,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     os.makedirs(args.out, exist_ok=True)
     extra_data = args.extra_data_dir or _auto_find_extra_data_dir()
-    hook_dir, _ = prepare_workdir(led_repo, workdir, extra_data_dir=extra_data)
+    hook_dir, _ = prepare_workdir(
+        led_repo, workdir, extra_data_dir=extra_data, reuse_locate_dir=args.reuse_locate_dir
+    )
     path_map, _ = build_model_path_map(args.base, args.inputs, orders, slot_family=slot_family)
 
     env = os.environ.copy()
@@ -868,6 +909,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "slot_family": slot_family,
             "nsamples": args.nsamples,
             "unpatched_upstream": args.unpatched_upstream,
+            "reused_locate_dir": os.path.abspath(args.reuse_locate_dir) if args.reuse_locate_dir else None,
         },
         base_model=args.base,
         inputs=args.inputs,
@@ -879,6 +921,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         external_repo="MqLeet/LED-Merging",
         external_commit=ext_commit,
         extra={
+            "config_role": config_role,
+            "is_official_default": config_role == "official_default",
             "upstream_unmodified": True,
             "score_dir_check": full_stats.get("score_dir_check", {}),
             "scores_complete": full_stats.get("scores_complete", False),

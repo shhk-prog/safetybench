@@ -29,7 +29,21 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from metrics import pass_at_1_by_problem, problem_bootstrap_ci  # noqa: E402
+
 REQUIRED_REFERENCE_KEYS = ("base", "safety_expert", "domain_expert")
+
+
+def utility_bootstrap_ci(
+    problem_scores: Sequence[float],
+    n_boot: int = 1000,
+    seed: int = 42,
+    alpha: float = 0.05,
+    as_percent: bool = True,
+) -> Dict[str, Any]:
+    """Problem-level 1,000-resample bootstrap 95% CI for utility scores (HumanEval+ 164, MBPP+ 378, GSM8K 1,319)."""
+    return problem_bootstrap_ci(problem_scores, n_boot=n_boot, seed=seed, alpha=alpha, as_percent=as_percent)
 
 
 def parse_method_alpha(model_name: str) -> Tuple[str, Optional[float]]:
@@ -38,13 +52,26 @@ def parse_method_alpha(model_name: str) -> Tuple[str, Optional[float]]:
     for pat in (
         r"scaling_coef_([0-9]+(?:\.[0-9]+)?)",
         r"safety_coef_([0-9]+(?:\.[0-9]+)?)",
+        r"safety_rate_([0-9]+(?:\.[0-9]+)?)",
         r"alpha_?([0-9]+(?:\.[0-9]+)?)",
         r"temp_([0-9]+(?:\.[0-9]+)?)",
     ):
         m = re.search(pat, model_name)
         if m:
             return method, float(m.group(1))
+    if method == "LEDMerging":
+        # Official default point (safety_rate=0.1) has no explicit safety_rate suffix
+        return method, 0.1
     return method, None
+
+
+def infer_config_role(model_name: str) -> str:
+    """Distinguish official default vs extra safety sweep settings in comparison tables."""
+    if model_name.startswith("LEDMerging") and re.search(r"safety_rate_([0-9]+(?:\.[0-9]+)?)", model_name):
+        m = re.search(r"safety_rate_([0-9]+(?:\.[0-9]+)?)", model_name)
+        if m and abs(float(m.group(1)) - 0.1) > 1e-9:
+            return "extra_safety_sweep"
+    return "official_default"
 
 
 def _parse_bool_flag(val: Any) -> Optional[bool]:
@@ -333,6 +360,7 @@ def compute_method_summaries(
                 "model": model,
                 "method": info["method"],
                 "alpha": info["alpha"],
+                "config_role": infer_config_role(model),
                 "VRR": sum(info["vrrs"]) / len(info["vrrs"]),
                 "cond_ASR": sum(info["cond_asrs"]) / len(info["cond_asrs"]),
                 "utility": float(utility_by_model[model]),
@@ -680,7 +708,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--metrics", required=True, help="all.csv")
     ap.add_argument("--utility", required=True, help="utility CSV or JSON mapping model -> score")
     ap.add_argument("--utility-col", default=None, help="optional task/column name in utility file")
-    ap.add_argument("--expert-utility", type=float, required=True, help="single-expert reference utility score (%)")
+    ap.add_argument("--expert-utility", type=float, required=True, help="single-expert reference utility score (%%)")
     ap.add_argument("--base-model", default=None, help="model name of base reference point in metrics/utility")
     ap.add_argument("--safety-expert", default=None, help="model name of safety expert reference point")
     ap.add_argument("--domain-expert", default=None, help="model name of domain expert reference point")

@@ -14,7 +14,14 @@ isolation experiment (`sst_v2/v5/results/rope_theta_ablation`):
       * WARNING (exit code 0, `warnings`, annotated in tables):
           - config mismatch (`rope_theta`, `vocab_size`, `eos_token_id`, etc.)
           - chat template mismatch across inputs/merged/evaluator
-          - degeneration (Section 4.2): rel_norm < 1% or domain projection < 10%
+          - degeneration (Section 4.2, revised 2026-11-26 to task-vector denominator because
+            MergeBench single experts are only 0.68-1.42% from base in ||theta_base||):
+              * changed_tensors == 0
+              * ||Delta_merged|| / max_i ||Delta_i|| < 5% (close to base)
+              * ||theta_merged - theta_i|| / ||Delta_i|| < 5% for any input i (close to input)
+              * domain projection_coeff < 10%
+            (rel_norm_diff_to_base = ||Delta_merged|| / ||theta_base|| is still recorded
+             for reference but NOT used for pass/fail judgement.)
       * INFEASIBLE (recorded by merge wrappers when vocab mismatch prevents merging altogether,
         e.g., LM-Cocktail).
 
@@ -312,7 +319,7 @@ def analyze_weights_from_stores(
     merged_name: str,
     merged_store: _TensorStore,
     lineage_thr: float = 0.5,
-    degenerate_rel_norm_thr: float = 0.01,
+    degenerate_tv_ratio_thr: float = 0.05,
     degenerate_proj_thr: float = 0.10,
     domain_inputs: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -415,9 +422,11 @@ def analyze_weights_from_stores(
             issues.append({"check": "lineage", "model": inp_name, "median_rel_dist": med, "threshold": lineage_thr})
 
         di_norm = math.sqrt(di_sq_total)
+        diff_inp_norm = math.sqrt(diff_inp_sq)
         global_cos = (dot_dm_di / (merged_delta_norm * di_norm)) if (merged_delta_norm > 0 and di_norm > 0) else 0.0
         proj_coeff = (dot_dm_di / di_sq_total) if di_sq_total > 0 else 0.0
-        rel_norm_to_input = (math.sqrt(diff_inp_sq) / math.sqrt(inp_norm_sq)) if inp_norm_sq > 0 else None
+        rel_norm_to_input = (diff_inp_norm / math.sqrt(inp_norm_sq)) if inp_norm_sq > 0 else None
+        dist_to_merged_tv_ratio = (diff_inp_norm / di_norm) if di_norm > 0 else None
 
         per_layer_cos: Dict[str, Optional[float]] = {}
         for lg in sorted(layer_di_sq.keys(), key=lambda x: (0, int(x.split(".")[1])) if x.startswith("layers.") else (1, x)):
@@ -435,20 +444,32 @@ def analyze_weights_from_stores(
             "cos_sim_to_merged_delta": round(global_cos, 6),
             "projection_coeff": round(proj_coeff, 6),
             "rel_norm_diff_to_merged": round(rel_norm_to_input, 6) if rel_norm_to_input is not None else None,
+            "dist_to_merged_tv_ratio": round(dist_to_merged_tv_ratio, 6) if dist_to_merged_tv_ratio is not None else None,
             "per_layer_cos_sim": per_layer_cos,
         }
         stats[inp_name] = inp_stat
         input_stats_map[inp_name] = inp_stat
 
-    # 3. Degeneration detection (Section 4.2):
-    # Flag if rel_norm(merged, base) < thr, or rel_norm(merged, any input) < thr,
-    # or domain input projection_coeff < proj_thr.
+    # 3. Degeneration detection (Section 4.2, revised 2026-11-26 to task-vector denominator):
+    #   (a) changed_tensors == 0
+    #   (b) ||Delta_merged|| / max_i ||Delta_i|| < degenerate_tv_ratio_thr (default 5%)
+    #   (c) ||theta_merged - theta_i|| / ||Delta_i|| < degenerate_tv_ratio_thr (default 5%)
+    #   (d) domain input projection_coeff < degenerate_proj_thr (default 10%)
+    # Note: rel_norm_diff_to_base (||Delta_merged|| / ||theta_base||) is recorded for reference ONLY.
+    max_input_delta_norm = max((s["task_vector_norm"] for s in input_stats_map.values()), default=0.0)
+    rel_to_max_input_delta = (merged_delta_norm / max_input_delta_norm) if max_input_delta_norm > 0 else None
+
     degenerate_reasons: List[Dict[str, Any]] = []
-    if rel_norm_to_base is not None and rel_norm_to_base < degenerate_rel_norm_thr:
+    if len(changed) == 0:
+        degenerate_reasons.append({
+            "reason": "zero_changed_tensors",
+            "changed_tensors": 0,
+        })
+    if rel_to_max_input_delta is not None and rel_to_max_input_delta < degenerate_tv_ratio_thr:
         degenerate_reasons.append({
             "reason": "close_to_base",
-            "rel_norm_diff": round(rel_norm_to_base, 6),
-            "threshold": degenerate_rel_norm_thr,
+            "merged_to_max_input_delta_ratio": round(rel_to_max_input_delta, 6),
+            "threshold": degenerate_tv_ratio_thr,
         })
 
     # Determine which inputs represent domain experts for projection check
@@ -459,13 +480,13 @@ def analyze_weights_from_stores(
         target_domain_inputs = non_safety if non_safety else list(input_stats_map.keys())
 
     for inp_name, istat in input_stats_map.items():
-        r_inp = istat["rel_norm_diff_to_merged"]
-        if r_inp is not None and r_inp < degenerate_rel_norm_thr:
+        r_tv = istat["dist_to_merged_tv_ratio"]
+        if r_tv is not None and r_tv < degenerate_tv_ratio_thr:
             degenerate_reasons.append({
                 "reason": "close_to_input",
                 "model": inp_name,
-                "rel_norm_diff": r_inp,
-                "threshold": degenerate_rel_norm_thr,
+                "dist_to_merged_tv_ratio": r_tv,
+                "threshold": degenerate_tv_ratio_thr,
             })
         if inp_name in target_domain_inputs and istat["task_vector_norm"] > 0:
             if istat["projection_coeff"] < degenerate_proj_thr:
@@ -476,14 +497,11 @@ def analyze_weights_from_stores(
                     "threshold": degenerate_proj_thr,
                 })
 
-    max_input_delta_norm = max((s["task_vector_norm"] for s in input_stats_map.values()), default=0.0)
-    rel_to_max_input_delta = (merged_delta_norm / max_input_delta_norm) if max_input_delta_norm > 0 else None
-
     degeneration_summary = {
         "degenerate": bool(degenerate_reasons),
         "reasons": degenerate_reasons,
         "thresholds": {
-            "rel_norm_thr": degenerate_rel_norm_thr,
+            "tv_ratio_thr": degenerate_tv_ratio_thr,
             "domain_projection_thr": degenerate_proj_thr,
         },
         "domain_inputs_checked": target_domain_inputs,
@@ -516,7 +534,7 @@ def check_weights(
     inputs: List[str],
     merged: str,
     lineage_thr: float = 0.5,
-    degenerate_rel_norm_thr: float = 0.01,
+    degenerate_tv_ratio_thr: float = 0.05,
     degenerate_proj_thr: float = 0.10,
     domain_inputs: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -534,7 +552,7 @@ def check_weights(
             merged_name=merged,
             merged_store=merged_store,
             lineage_thr=lineage_thr,
-            degenerate_rel_norm_thr=degenerate_rel_norm_thr,
+            degenerate_tv_ratio_thr=degenerate_tv_ratio_thr,
             degenerate_proj_thr=degenerate_proj_thr,
             domain_inputs=domain_inputs,
         )
@@ -555,8 +573,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--expect-algo", default=None)
     ap.add_argument("--weights", action="store_true", help="also run lineage/numerics/degeneration checks (float32)")
     ap.add_argument("--lineage-thr", type=float, default=0.5)
-    ap.add_argument("--degenerate-rel-norm-thr", type=float, default=0.01,
-                    help="relative L2 norm threshold below which a merge is flagged degenerate (default 0.01)")
+    ap.add_argument("--degenerate-tv-ratio-thr", "--degenerate-rel-norm-thr", dest="degenerate_tv_ratio_thr",
+                    type=float, default=0.05,
+                    help="task-vector ratio threshold for close_to_base (||Delta_m||/max||Delta_i||) and close_to_input (||theta_m-theta_i||/||Delta_i||) (default 0.05)")
     ap.add_argument("--degenerate-proj-thr", type=float, default=0.10,
                     help="domain task-vector projection threshold below which a merge is flagged degenerate (default 0.10)")
     ap.add_argument("--domain-inputs", nargs="+", default=None,
@@ -587,7 +606,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.inputs,
             args.merged,
             lineage_thr=args.lineage_thr,
-            degenerate_rel_norm_thr=args.degenerate_rel_norm_thr,
+            degenerate_tv_ratio_thr=args.degenerate_tv_ratio_thr,
             degenerate_proj_thr=args.degenerate_proj_thr,
             domain_inputs=args.domain_inputs,
         )

@@ -42,7 +42,7 @@ import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metrics import wilson_ci_percent  # noqa: E402
+from metrics import pass_at_1_by_problem, problem_bootstrap_ci, wilson_ci_percent  # noqa: E402
 
 JST = timezone(timedelta(hours=9))
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -50,9 +50,10 @@ DEFAULT_SPEC_PATH = os.path.join(DATA_DIR, "expert_eval_spec.yaml")
 
 
 def extract_math_answer(text: str) -> Optional[str]:
-    """Unified math extractor (math_unified_v1):
-    1. \\boxed{...}
-    2. 'The (final) answer is ...'
+    """Unified math extractor (math_unified_v2):
+    1. \\boxed{...} -> content of last boxed expression
+    2. Last sentence starting with 'The (final) answer is' / 'final answer' ->
+       LAST numeric token in that sentence (handles 'The answer is 34800 / 20 = 1740.' -> '1740')
     3. '#### <num>'
     4. Last numeric token in response.
     """
@@ -67,21 +68,25 @@ def extract_math_answer(text: str) -> Optional[str]:
         m_num = re.search(r"-?\d+(?:\.\d+)?", cand)
         return m_num.group(0) if m_num else cand
 
-    # 2. "The (final) answer is: 18"
-    m_ans = re.findall(
-        r"(?:the\s+(?:final\s+)?answer\s+is|final\s+answer)\s*:?\s*\$?\s*\\?(?:boxed\{)?(-?[\d,]+(?:\.\d+)?)\}?",
-        s,
-        flags=re.IGNORECASE,
+    # 2. Last "The (final) answer is ..." sentence -> take the LAST number in that sentence
+    ans_starts = list(
+        re.finditer(r"(?:the\s+(?:final\s+)?answer\s+is|final\s+answer)\b", s, flags=re.IGNORECASE)
     )
-    if m_ans:
-        return m_ans[-1].replace(",", "").strip()
+    if ans_starts:
+        tail = s[ans_starts[-1].end():]
+        # Take up to end of that sentence (newline, or period followed by whitespace/end,
+        # preserving decimal points like 12.50).
+        sent = re.split(r"\n|\.(?:\s|$)", tail, maxsplit=1)[0]
+        sent_nums = re.findall(r"-?\d[\d,]*(?:\.\d+)?", sent)
+        if sent_nums:
+            return sent_nums[-1].replace(",", "").strip()
 
     # 3. "#### 18"
     m_hash = re.findall(r"####\s*\$?(-?[\d,]+(?:\.\d+)?)", s)
     if m_hash:
         return m_hash[-1].replace(",", "").strip()
 
-    # 4. Last numeric token
+    # 4. Last numeric token in response
     nums = re.findall(r"-?\d[\d,]*(?:\.\d+)?", s)
     if nums:
         return nums[-1].replace(",", "").strip()
@@ -142,10 +147,29 @@ def load_lmeval_samples_jsonl(eval_dir: str, task_prefix: str = "gsm8k") -> Tupl
 def parse_lmeval_math_samples(
     samples: List[Dict[str, Any]],
     use_lmeval_filtered: bool = False,
+    preferred_filter: str = "flexible-extract",
 ) -> List[Dict[str, Any]]:
-    """Convert lm-eval sample records into normalized gate inspection items."""
+    """Convert lm-eval sample records into normalized gate inspection items.
+
+    Note: `lm-eval --log_samples` on `gsm8k_cot` writes TWO rows per `doc_id`
+    (one for `strict-match`, one for `flexible-extract`). We select `preferred_filter`
+    when present and deduplicate by `doc_id` so `n` equals the exact problem count (1,319).
+    """
+    has_preferred = any(rec.get("filter") == preferred_filter for rec in samples)
+    filtered_samples = (
+        [rec for rec in samples if rec.get("filter") == preferred_filter]
+        if has_preferred
+        else samples
+    )
+
     items: List[Dict[str, Any]] = []
-    for i, rec in enumerate(samples):
+    seen_doc_ids: Set[Any] = set()
+    for i, rec in enumerate(filtered_samples):
+        doc_id = rec.get("doc_id")
+        if doc_id is not None:
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
         doc = rec.get("doc") or {}
         prompt = doc.get("question", rec.get("prompt", ""))
         raw_target = rec.get("target", doc.get("answer"))
@@ -175,7 +199,7 @@ def parse_lmeval_math_samples(
             correct = numeric_equal(extracted, target)
 
         items.append({
-            "index": rec.get("doc_id", i),
+            "index": doc_id if doc_id is not None else i,
             "prompt": prompt,
             "response": response,
             "extracted": extracted,
@@ -259,7 +283,9 @@ def evaluate_utility_gate(
 
     n_correct = sum(1 for it in items if it.get("correct"))
     score = round(100.0 * n_correct / n, 4)
-    ci_lo, ci_hi = wilson_ci_percent(n_correct, n)
+    boot = problem_bootstrap_ci([1.0 if it.get("correct") else 0.0 for it in items], n_boot=1000, seed=seed, as_percent=True)
+    ci_lo, ci_hi = boot["ci_low"], boot["ci_high"]
+    w_lo, w_hi = wilson_ci_percent(n_correct, n)
 
     extracted_vals = [it.get("extracted") for it in items]
     n_failed_ext = sum(1 for v in extracted_vals if v is None or str(v).strip() == "")
@@ -351,8 +377,11 @@ def evaluate_utility_gate(
         "n": n,
         "n_correct": n_correct,
         "score": score,
+        "ci_method": boot["method"],
         "score_ci_low": ci_lo,
         "score_ci_high": ci_hi,
+        "wilson_ci_low": w_lo,
+        "wilson_ci_high": w_hi,
         "official_score": official_score,
         "official_diff": official_diff,
         "base_score": base_score,
@@ -474,23 +503,26 @@ def write_code_samples_review_md(
     n_incorrect: int = 20,
     seed: int = 42,
 ) -> str:
-    """Export up to 20 random INCORRECT code samples to `samples_review.md` (Addendum [3])."""
+    """Export up to 20 random INCORRECT code samples with FULL code and detailed test errors (Addendum [3])."""
     rng = random.Random(seed)
     incorrect = [it for it in items if not it.get("correct")]
     chosen = rng.sample(incorrect, min(n_incorrect, len(incorrect)))
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    def _clean(s: Any, max_len: int = 240) -> str:
-        txt = " ".join(str(s or "").replace("|", "\\|").splitlines()).strip()
-        return txt[:max_len] + ("..." if len(txt) > max_len else "")
+    def _inline(s: Any) -> str:
+        return " ".join(str(s or "").replace("|", "\\|").splitlines()).strip()
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(f"# Code Sample Review — Incorrect Cases ({model_name} / {task_name})\n\n")
         f.write(f"- 不正解総数: {len(incorrect)} / {len(items)}件\n")
         f.write(f"- 目視確認用に抽出した不正解件数: {len(chosen)}件 (seed={seed})\n")
         f.write("- 確認後、該当実験フォルダの `RUN.md` に「確認済み」と記入すること。\n\n")
-        f.write("| # | task_id | 診断フラグ | エラー詳細 | 生成コード（抜粋） |\n")
-        f.write("|---:|---|---|---|---|\n")
+
+        # Summary index table
+        f.write("## 一覧\n\n")
+        f.write("| # | task_id | 診断フラグ | エラー詳細（テスト・期待値含む） |\n")
+        f.write("|---:|---|---|---|\n")
+        rendered: List[Tuple[int, str, str, str, str]] = []
         for k, it in enumerate(chosen, 1):
             diag = it.get("_diag") or {}
             flags = []
@@ -501,14 +533,40 @@ def write_code_samples_review_md(
             if diag.get("has_duplicate_func_def"):
                 flags.append(f"DupDef({','.join(diag.get('duplicate_func_names', []))})")
             flag_str = ", ".join(flags) if flags else "WrongAnswer/Runtime"
-            err_str = it.get("error") or diag.get("syntax_error_detail") or (
-                f"undef:{','.join(diag.get('undefined_calls', []))}" if diag.get("undefined_calls") else ""
-            )
-            f.write(
-                f"| {k} | `{_clean(it.get('task_id', it.get('index', k)), 40)}` "
-                f"| `{flag_str}` | {_clean(err_str, 120)} | `{_clean(it.get('code', ''), 240)}` |\n"
-            )
+            err_parts = []
+            if it.get("error"):
+                err_parts.append(str(it["error"]))
+            if it.get("failing_test"):
+                err_parts.append(f"test: {it['failing_test']}")
+            if diag.get("syntax_error_detail") and diag["syntax_error_detail"] not in str(it.get("error") or ""):
+                err_parts.append(diag["syntax_error_detail"])
+            if diag.get("undefined_calls"):
+                err_parts.append(f"undef:{','.join(diag['undefined_calls'])}")
+            err_str = " | ".join(p for p in err_parts if p) or "(no message)"
+            tid = str(it.get("task_id", it.get("index", k)))
+            code_full = str(it.get("code", ""))
+            rendered.append((k, tid, flag_str, err_str, code_full))
+            f.write(f"| {k} | `{_inline(tid)}` | `{flag_str}` | {_inline(err_str)} |\n")
+
+        # Full generated code section (never truncated)
+        f.write("\n## 生成コード全文とエラー詳細\n\n")
+        for k, tid, flag_str, err_str, code_full in rendered:
+            f.write(f"### #{k} `{tid}` (`{flag_str}`)\n\n")
+            f.write(f"- **エラー詳細**: `{_inline(err_str)}`\n\n")
+            f.write("```python\n")
+            f.write(code_full.rstrip("\n") + "\n")
+            f.write("```\n\n")
     return out_path
+
+
+def _try_load_tokenizer(tokenizer_name_or_path: Optional[str]):
+    if not tokenizer_name_or_path:
+        return None
+    try:
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    except Exception:
+        return None
 
 
 def evaluate_code_utility_gate(
@@ -524,13 +582,24 @@ def evaluate_code_utility_gate(
     max_syntax_error_rate: float = 0.05,
     max_name_error_rate: float = 0.02,
     max_dup_def_rate: float = 0.05,
+    max_length_generation: int = 512,
+    max_truncation_warn_rate: float = 0.05,
+    tokenizer_name_or_path: Optional[str] = None,
     min_safety_vrr: float = 0.95,
     review_out_path: Optional[str] = None,
     review_n_incorrect: int = 20,
+    n_boot: int = 1000,
     seed: int = 42,
 ) -> Dict[str, Any]:
-    """Run all Section 2.2 + Addendum [3] automatic checks on code generation samples."""
+    """Run all Section 2.2 + Addendum [3] automatic checks on code generation samples.
+
+    Uses problem-level (clustered) 1,000-resample bootstrap 95% CI for pass@1
+    (HumanEval+ 164 problems, MBPP+ 378 problems) because multiple samples per problem
+    are NOT independent. Also computes truncation rate at `max_length_generation` (512)
+    and emits a warning if > 5% without changing the generation limit.
+    """
     failures: List[Dict[str, Any]] = []
+    warnings_list: List[Dict[str, Any]] = []
     n = len(items)
     if not samples_logged or n == 0:
         failures.append({
@@ -541,15 +610,21 @@ def evaluate_code_utility_gate(
             "model": model_name,
             "task": task_name,
             "passed": False,
-            "n": n,
+            "n_samples": n,
+            "warnings": warnings_list,
             "failures": failures,
         }
+
+    tok = _try_load_tokenizer(tokenizer_name_or_path)
+    trunc_cutoff = max(1, int(max_length_generation) - 1)
 
     annotated: List[Dict[str, Any]] = []
     n_syntax = 0
     n_name = 0
     n_dup = 0
     n_correct = 0
+    n_truncated = 0
+    trunc_checked = 0
     has_correct_flag = False
     for i, it in enumerate(items):
         code = it.get("code", it.get("completion", it.get("response", "")))
@@ -566,21 +641,61 @@ def evaluate_code_utility_gate(
             has_correct_flag = True
             if bool(corr):
                 n_correct += 1
-        annotated.append({**it, "code": code, "correct": bool(corr) if corr is not None else False, "_diag": diag})
+
+        is_trunc: Optional[bool] = None
+        if "truncated" in it and it["truncated"] is not None:
+            is_trunc = bool(it["truncated"])
+        elif "token_length" in it and it["token_length"] is not None:
+            is_trunc = int(it["token_length"]) >= trunc_cutoff
+        elif tok is not None:
+            n_tok = len(tok.encode(code or "", add_special_tokens=True))
+            is_trunc = n_tok >= trunc_cutoff
+        if is_trunc is not None:
+            trunc_checked += 1
+            if is_trunc:
+                n_truncated += 1
+
+        annotated.append({
+            **it,
+            "code": code,
+            "correct": bool(corr) if corr is not None else False,
+            "_diag": diag,
+            "_truncated": is_trunc,
+        })
 
     syntax_rate = n_syntax / n
     name_rate = n_name / n
     dup_rate = n_dup / n
+    truncation_rate = (n_truncated / trunc_checked) if trunc_checked > 0 else None
 
-    if measured_score is not None:
+    if truncation_rate is not None and truncation_rate > max_truncation_warn_rate:
+        warnings_list.append({
+            "check": "max_length_truncation_rate",
+            "rate": round(truncation_rate, 6),
+            "count": n_truncated,
+            "n": trunc_checked,
+            "max_length_generation": max_length_generation,
+            "threshold": max_truncation_warn_rate,
+            "note": "Warning only; keep max_length_generation=512 unchanged for MergeBench comparability.",
+        })
+
+    # Problem-level (clustered) bootstrap 95% CI (1,000 resamples over problems, NOT samples)
+    n_problems: Optional[int] = None
+    ci_method: Optional[str] = None
+    ci_lo: Optional[float] = None
+    ci_hi: Optional[float] = None
+    if has_correct_flag:
+        _, prob_scores = pass_at_1_by_problem(annotated)
+        n_problems = len(prob_scores)
+        boot = problem_bootstrap_ci(prob_scores, n_boot=n_boot, seed=seed, as_percent=True)
+        ci_method = boot["method"]
+        ci_lo = boot["ci_low"]
+        ci_hi = boot["ci_high"]
+        score = round(float(measured_score), 4) if measured_score is not None else boot["mean"]
+    elif measured_score is not None:
         score = round(float(measured_score), 4)
-        ci_lo, ci_hi = wilson_ci_percent(int(round(score / 100.0 * n)), n)
-    elif has_correct_flag:
-        score = round(100.0 * n_correct / n, 4)
-        ci_lo, ci_hi = wilson_ci_percent(n_correct, n)
     else:
         score = None
-        ci_lo, ci_hi = None, None
 
     # Addendum [3] mandatory code checks
     if syntax_rate >= max_syntax_error_rate:
@@ -649,9 +764,11 @@ def evaluate_code_utility_gate(
         "model": model_name,
         "task": task_name,
         "passed": len(failures) == 0,
+        "n_problems": n_problems,
         "n_samples": n,
         "n_correct": n_correct if has_correct_flag else None,
         "score": score,
+        "ci_method": ci_method,
         "score_ci_low": ci_lo,
         "score_ci_high": ci_hi,
         "official_score": official_score,
@@ -664,8 +781,12 @@ def evaluate_code_utility_gate(
         "helper_name_error_rate": round(name_rate, 6),
         "duplicate_func_def_count": n_dup,
         "duplicate_func_def_rate": round(dup_rate, 6),
+        "max_length_generation": max_length_generation,
+        "truncated_count": n_truncated if trunc_checked > 0 else None,
+        "truncation_rate": round(truncation_rate, 6) if truncation_rate is not None else None,
         "safety_vrr": round(float(safety_vrr), 6) if safety_vrr is not None else None,
         "samples_review_md": review_written,
+        "warnings": warnings_list,
         "failures": failures,
     }
 
@@ -760,6 +881,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_code.add_argument("--official-score", type=float, default=None)
     p_code.add_argument("--base-score", type=float, default=None)
     p_code.add_argument("--safety-vrr", type=float, default=None)
+    p_code.add_argument("--max-length-generation", type=int, default=512)
+    p_code.add_argument("--tokenizer", default=None, help="tokenizer path/HF id for max_length truncation detection (default: --model)")
     p_code.add_argument("--review-out", default=None, help="path for outputs/samples_review.md (20 incorrect samples)")
     p_code.add_argument("--report", default=None, help="JSON report output path")
     p_code.add_argument("--seed", type=int, default=42)
@@ -785,9 +908,12 @@ def _load_code_generations(path: str, task_name: str) -> List[Dict[str, Any]]:
                 rec = json.loads(line)
                 out.append({
                     "task_id": rec.get("task_id", f"{task_name}/{i}"),
+                    "problem_id": rec.get("problem_id"),
                     "code": rec.get("solution", rec.get("code", rec.get("completion", rec.get("response", "")))),
                     "correct": rec.get("passed", rec.get("correct", rec.get("base_status") == "pass")),
                     "error": rec.get("error", rec.get("result", "")),
+                    "token_length": rec.get("token_length"),
+                    "truncated": rec.get("truncated"),
                 })
         return out
     with open(path, encoding="utf-8") as f:
@@ -852,6 +978,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             official_score=args.official_score,
             base_score=args.base_score,
             safety_vrr=args.safety_vrr,
+            max_length_generation=args.max_length_generation,
+            tokenizer_name_or_path=args.tokenizer or args.model,
             samples_logged=len(items) > 0,
             review_out_path=args.review_out,
             seed=args.seed,

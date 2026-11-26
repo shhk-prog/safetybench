@@ -1,11 +1,11 @@
 # SafeMergeBench 実装指示書 v2 タスクリスト
 
 作成日: 2026-11-26  
-準拠文書: [SafeMergeBench 実装指示書 v2（11月26日）.md](file:///mnt/nas/home/hiromi/src/safetybench/docs/SafeMergeBench%20実装指示書%20v2（11月26日）.md)
+準拠文書: [SafeMergeBench 実装指示書 v2（11月26日）.md](file:///mnt/nas/home/hiromi/src/safetybench/docs/SafeMergeBench%20実装指示書%20v2（11月26日）.md) ＋ 追記指示【1】〜【4】および LED-Merging 追加指示 (1–4)
 
 ---
 
-## フェーズ1（11/26 優先）：結果管理・既定修正（1・4・6・7）・退化検出＆LED-Merging確認
+## フェーズ1（11/26 完了）：結果管理・既定修正（1・3・4・5・6・7）・退化検出＆LED-Merging【1】【2】
 
 - [x] **第1節 結果フォルダ管理と強制ツール**
   - [x] `safemerge/new_run.py` 作成（`results/runs/YYYYMMDD-HHMM_名前/` 作成、`RUN.md` 雛形、`env.json`＋`config/uncommitted.diff`、`INDEX.md` 追記、同一分重複時の `-2` 付与）
@@ -19,69 +19,51 @@
   - [x] **3.5 人手ラベル追加 50 件ブラインド抽出**: 実環境トラックから「両規則妥当＆HB/SR無害＆WG有害」50件抽出（`20261126-1351_human-eval-extra50-wg-only`）
   - [x] **3.6 RegMean 単精度版対応**: 単精度 Gram/逆行列オプション（`--regmean-fp32` / `RegMeanFP32`）と上流 `bfloat16` 版の両対応、`PATCHES.md` に差分および Fisher 単精度積算を明記
   - [x] **3.7 LED-Merging ラッパー改善**: 上流 `LED-Merging/` を 1 バイトも改変せず、ラッパー側で `MODEL_DIR` / `modeltype2path` と作業パスを環境変数・シンボリックリンク・ランチャーで差し替え
-- [x] **第4.3節（先行分）誤差の付与（`metrics.py` & `compare.py`）**
-  - [x] `metrics.py` の ASR・VRR・cond_ASR・VSR・過剰拒否率・有用性に Wilson 法 95% 信頼区間を付与
-  - [x] `compare.py` に対応付きブートストラップ（1,000回）95% CI とシード間標準偏差ヘルパーを実装
-- [x] **第4.2節 マージ退化の検出＆LED-Merging 確認（最優先）**
-  - [x] `integrity_gate.py --weights` に単精度計算でタスクベクトル cos 類似度（全体・層ごと）、分野更新の射影係数、ベース・各入力との相対ノルム、更新テンソル数・未更新例、退化フラグ（相対ノルム <1% または 射影係数 <10%、しきい値引数可変）を追加
-  - [x] `sst_v2` の LED-Merging マージ済みモデル（`safety+math`・`safety+code`）を検査し、ベースとの差（0.0, 289/291 テンソル無変更）と上流公式バグ原因を特定
-  - [x] `safetybench` ラッパーで `Llama-3.2-3B-Instruct`（安全＋数学）の LED-Merging 煙テストを実施（マスク非ゼロ 8.4%/9.0%・235/254層更新・数学 3/3 正答・有害 2/2 拒否）
+- [x] **第4.2節＆追記【1】【2】LED-Merging 原因確定・厳格煙テスト・未修正再現**
+  - [x] `integrity_gate.py --weights` に単精度計算でタスクベクトル cos 類似度（全体・層ごと）、分野更新の射影係数、ベース・各入力との相対ノルム、入力最大デルタ比、更新テンソル数・未更新例、退化フラグを追加
+  - [x] `sst_v2` LED-Merging モデル重み検査（`20261126-1309_led-merging-diagnosis`）：289/291層ベース完全一致を確認
+  - [x] **【2】原因A帰属確定**：`LED-Merging/README.md` L63–68・`locate/scripts/locate_inst.sh` L33–86・`locate/lib/model_wrapper.py` L515–531 および `sst_v2`/`safetybench` 両ラッパーを照合し「上流公開コードの不具合」と確定
+  - [x] **【1】ラッパー強化＆厳格煙テスト**（`20261126-1444_led-merging-strict-smoke-and-repro` ＋ 改定後再判定 `20261126-1541_led-smoke-rejudge-tv-norm`）：重要度ファイル数検査（不足時マージ前停止）・形不一致テンソル記録・公式 `fuse_rates`（0.1/0.4/0.5）を組み込み、3B `safety+math`（語彙不一致）・3B `safety+coding`（語彙一致）・未修正公開コード再現を実行。確認①のタスクベクトル基準（`||Δ_m||/max||Δ_i||<5%`, `||θ_m-θ_i||/||Δ_i||<5%`）への改定後、修正版2本は完全合格・未修正版は退化検出で不合格を確認。確認②の `safety_rate` 0.3/0.5 追加（`locate` 再利用・`config_role` 区別）も実装完了。
 
-## フェーズ2（11/26 決定済み反映）：完全性ゲート厳格度（第4.4節）
+## フェーズ2（11/26 完了）：完全性ゲート厳格度（第4.4節）
 
-- [x] `sst_v2/v5/results/rope_theta_ablation` の結果（DARE 97.5%→99.4–100%、SST 89.1%→72.0–93.8%）に基づく4.4節の既定方針を確認
+- [x] `sst_v2/v5/results/rope_theta_ablation` の結果に基づく 4.4 節の既定方針を確認
 - [x] `integrity_gate.py` の既定値更新（系統不一致 >50% = 不合格・終了コード1、rope_theta/語彙数/終了トークン/テンプレート不一致 = 警告・終了コード0、根拠フォルダ明記）
 - [x] `PATCHES.md` へ根拠フォルダと判断結果を記載
 - [x] テスト追加・確認（系統不一致=終了コード1、設定不一致のみ=終了コード0で警告記録）
 
-## フェーズ3（11/27）：評価設定検証ゲート（第2節）・WildGuardTest 再生成・比較拡張（4.1/4.3）
+## フェーズ3（11/26〜11/27）：評価設定検証ゲート（第2節・追記【3】）・WildGuardTest 再生成・比較拡張（4.1/4.3・追記【4】）
 
-- [x] **第2節コード実装（先行完了）**
+- [x] **第2節＋追記【3】コード実装完了**
   - [x] `safemerge/data/expert_eval_spec.yaml` 作成
-  - [x] `safemerge/utility_gate.py` 実装＋テスト（公式値±5pt、ベース比較、抽出失敗率<5%、偏り<10%、非数値<1%、20件目視表、VRR≥0.95、`--log_samples`強制、`eval_lock.yaml`ハッシュ照合）
-  - [x] `evaluate_safemerge.sh` へ `eval_lock.yaml` 照合と `--log_samples` 組み込み
-- [x] **第4.1節コード実装（先行完了）**
-  - [x] `compare.py` の同一有害率での線形補間有用性・「到達せず」処理・3参照点必須プロット＆欠落エラー・`common.py` の安全注入量ノルム記録・実行不能記録＋テスト
-- [ ] **11/27 実機 GPU 実行分**：
-  - [ ] 標準トラック `Llama-3.1-8B-Instruct` 4モデルを 2.2 検証ゲートに通し、`configs/eval_lock.yaml` を固定
-  - [ ] 第3節の2：`WildGuardTest` を修正後コードで単体4モデル再生成・3判定器採点（旧結果を「置き換え済み」記録）
+  - [x] `safemerge/utility_gate.py` 実装＋テスト（数学/一般用ゲート ＋ 追記【3】コード用 `check-code`: 構文エラー<5%・補助関数 NameError<2%・関数重複定義<5%・不正解20件目視表 `samples_review.md`）
+  - [x] `safemerge/eval_code_samples.py` 作成（`bigcode-evaluation-harness` 無改変で保存生成物から全サンプル正誤・実行時エラー JSONL を生成）
+  - [x] `evaluate_safemerge.sh` へ `eval_lock.yaml` 照合・`--log_samples`・`--save_generations` 組み込み
+- [x] **第4.1節＋追記【4】・第4.3節コード実装完了**
+  - [x] `compare.py` の判定器別同一有害率線形補間・判定器間順位逆転ペア一覧出力（`find_judge_rank_flips` / `write_rank_flips_markdown`）・「到達せず」処理・3参照点必須プロット＆欠落エラー・対応付きブートストラップ（1,000回）95% CI・シード標準偏差ヘルパー＋テスト
+  - [x] `metrics.py` 全指標への Wilson 95% CI 付与、`common.py` の安全注入量ノルム記録・実行不能記録
+- [x] **追記【3】実機実行（完了・4/4 合格）**：
+  - [x] 標準トラック `Llama-3.1-8B-Instruct`（Base & `_coding`）の HumanEval+・MBPP+ 生成物保存＋コード用検証ゲート（`20261126-1525_std-llama31-code-utility-gate`：4/4 PASS、不正解20件目視表 `samples_review_*.md` 出力済み）
+- [x] **11/27 実機 GPU 実行分（先行完了・`eval_lock.yaml` 固定のみ目視承認待ち）**：
+  - [x] 第3節の2：`WildGuardTest` を修正後コードで単体4モデル再生成・公式3判定器採点・参照一致 0/749 確認（`20261126-1908_std-llama31-experts-v2-wgt-gsm8k-safetycode`、旧結果を「置き換え済み」記録）
+  - [x] 表11【要測定】項目完了（`_safety` GSM8K `72.71%`・HE+ `41.59%`・MBPP+ `58.65%`、`_coding` GSM8K `67.85%`）＋全4モデル GSM8K (`math_unified_v2`, `n=1,319`, 問題単位ブートストラップ CI) ゲート＆20件目視表出力＋Base `max_length=1024` 感度確認（HE+ `+0.06pt` / MBPP+ `-0.93pt`）
+  - [ ] `_safety` HumanEval+ 空補完（16.89%）の扱い確認後、`configs/eval_lock.yaml` を固定（`_math` VRR `94.78%` 注記込み）
 
-## 実環境トラック `sst_v2` 先行作業（第2.5節・11/26〜11/28）
-
-※ 標準トラックのマージ・評価仕組みは `sst_v2` には作らず `safetybench` のみで行う。WizardCoder 検証通過までコード有用性の数値（「0%」含む）は論文結論に不使用。
-
-- [ ] **2.5.1（最優先）**: WizardCoder の有用性検証（公式形式を `expert_eval_spec.yaml` に記載→2.2 ゲート通過→表3・rope_theta 含むコード組合せ再評価）
-- [ ] **2.5.2**: LED-Merging の重み・マスク確認（4.2 統計適用）
-- [ ] **2.5.3**: MedAlpaca の有用性検証
-- [ ] **2.5.4**: 数学再評価（seed44 完了後）の曲線集計（4.1 同一有害率比較・4.3 信頼区間・主要点 1,319 問全件再評価）
-- [ ] **2.5.5**: 既存2実験（数学再評価・rope_theta）へ後から `RUN.md` 付与・比較表を `outputs/` に配置
-
-## フェーズ3（11/27）：評価設定検証ゲート（第2節）・WildGuardTest 再生成・比較拡張（4.1/4.3）
-
-- [ ] **第2節 評価設定の検証と固定（P6）**
-  - [ ] `safemerge/data/expert_eval_spec.yaml` 作成（標準トラック Llama-3.1-8B-Instruct / gemma-2-9b-it、実環境トラック WizardMath / WizardCoder / MedAlpaca）
-  - [ ] `safemerge/utility_gate.py` 実装（公式値差 ±5pt、ベース比較、抽出失敗率 <5%、抽出値偏り <10%、数学非数値 <1%、20件目視表 `outputs/samples_review.md`、VRR ≥0.95、`--log_samples` 強制）
-  - [ ] `configs/eval_lock.yaml` 生成とハッシュ固定、`evaluate_safemerge.sh` でマージ済みモデル評価前のハッシュ照合ゲートを強制
-  - [ ] 標準トラック `Llama-3.1-8B-Instruct` 4モデル（Base, safety, math, coding）を検証ゲートに通し、`eval_lock.yaml` を固定
-- [ ] **第3節の2・3**:
-  - [ ] `WildGuardTest` を修正後コードで単体4モデル再生成・3判定器採点（旧結果を「置き換え済み」記録）
-  - [ ] MergeBench 公開 `safety_generation.json` の `WildGuardTest` と `allenai/wildguardmix` 参照回答の一致率を集計
-- [ ] **第4.1節・第4.3節 `compare.py` 拡張**:
-  - [ ] 同じ安全性（基準有害率、既定=安全専門モデルの2倍）での有用性線形補間・「到達せず」処理・判定器別出力
-  - [ ] 注入量（安全更新ノルム・同 α TA 比）を `merge_metadata.json` に記録する処理
-  - [ ] 参照点3点（Base・安全専門・分野専門）の必須プロットと α=0 差異の注記
-  - [ ] 対応付きブートストラップ（1,000回）による手法間・判定器間差分の 95% 信頼区間
-  - [ ] テスト追加（補間・「到達せず」・参照点欠落エラー・ブートストラップ CI）
-
-## フェーズ4（11/28）：`gemma-2-9b-it`・実環境専門モデル検証・人手ラベル準備
+## フェーズ4（11/28）：`gemma-2-9b-it`・再現確認
 
 - [ ] `gemma-2-9b-it` 4モデル（Base, safety, math, coding）の検証ゲート実行・安全性劣化確認
-- [ ] 実環境トラック `WizardCoder`・`MedAlpaca` の検証ゲート実行（不合格なら公式形式で再評価）
 - [ ] MergeBench 本家の lm-eval 版での `gsm8k_cot` 誤抽出再現確認（別実験フォルダ）
-- [ ] **第3節の5**: 人手ラベル追加50件（両規則妥当 ＆ HB/SR 無害 ＆ WG 有害）のブラインド抽出
 
 ## フェーズ5（11/29〜12/5）：本実験開始判定（5.1）と実行
 
 - [ ] 第5.1節の全5条件達成確認（本実験開始ゲート）
-- [ ] 標準トラック主実験（Llama-3.1-8B-Instruct × 2ペア = 76モデル＋乱数シード）
+- [ ] 標準トラック主実験（`Llama-3.1-8B-Instruct` × 2ペア = 76モデル＋乱数シード）
 - [ ] `gemma-2-9b-it` 一般化確認・人手ラベル集計・数値確定
+
+---
+
+## 参考：実環境トラック `sst_v2` 側（第2.5節、`sst_v2` リポジトリ担当）
+※ 標準トラックのマージ・評価仕組みは `sst_v2` には作らず `safetybench` のみで行う。
+- `2.5.1` WizardCoder 有用性検証（`sst_v2` 側で 5.49%→50.61% 確認済み、追記【3】へ反映済み）
+- `2.5.2` LED-Merging 重み・マスク確認（`20261126-1309`・`20261126-1444` で原因確定・標準トラック再現完了）
+- `2.5.3–2.5.5` MedAlpaca 検証・数学曲線集計・既存実験 `RUN.md` 付与（`sst_v2` 側で実施）

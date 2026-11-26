@@ -1,12 +1,18 @@
-"""Strict LED-Merging smoke test verifier (Implementation Spec v2, Section 4.2 + Addendum [1]).
+"""Strict LED-Merging smoke test verifier (Implementation Spec v2, Section 4.2 + Addendum [1],
+revised 2026-11-26 to task-vector-normalized degeneration criteria).
 
 Fails (exit code 1) if ANY of the required checks does not pass:
   1. Importance score files in `wanda_score/` match expected tensor count (`scores_complete == True`).
   2. Updated tensors `changed_tensors > 0`.
-  3. Relative L2 distance to base `rel_norm_diff_to_base >= min_rel_norm` (default 0.01 = 1%).
-  4. Domain update retention `projection_coeff >= min_proj` (default 0.10 = 10%).
-  5. Shape-mismatched skipped tensors are recorded explicitly (`skipped_shape_mismatch_names`).
-  6. Simple math/sanity problems are answered correctly AND outputs differ from base model.
+  3. Not degenerate to base: `||Delta_merged|| / max_i ||Delta_i|| >= min_tv_ratio` (default 0.05 = 5%).
+  4. Not degenerate to any input: `||theta_merged - theta_i|| / ||Delta_i|| >= min_tv_ratio` (default 0.05 = 5%).
+  5. Domain update retention: `projection_coeff >= min_proj` (default 0.10 = 10%).
+  6. Shape-mismatched skipped tensors are recorded explicitly (`skipped_shape_mismatch_names`).
+  7. Simple math/sanity problems are answered correctly AND outputs differ from base model.
+
+Note: `rel_norm_diff_to_base = ||Delta_merged|| / ||theta_base||` is recorded in summary
+for reference ONLY and is NOT used for pass/fail judgement (MergeBench single experts are
+only 0.68-1.42% away from base in ||theta_base||).
 """
 from __future__ import annotations
 
@@ -31,7 +37,7 @@ def evaluate_smoke_criteria(
     domain_input: str,
     merged_responses: Optional[List[Dict[str, Any]]] = None,
     base_responses: Optional[List[Dict[str, Any]]] = None,
-    min_rel_norm: float = 0.01,
+    min_tv_ratio: float = 0.05,
     min_proj: float = 0.10,
 ) -> Dict[str, Any]:
     failures: List[Dict[str, Any]] = []
@@ -46,21 +52,39 @@ def evaluate_smoke_criteria(
             "score_dir_check": score_check,
         })
 
-    # 2, 3, 4. Weight update & degeneration checks
-    degen = (gate_report.get("stats") or {}).get("degeneration") or {}
+    # 2, 3, 4, 5. Weight update & task-vector-normalized degeneration checks
+    stats = gate_report.get("stats") or {}
+    degen = stats.get("degeneration") or {}
     changed_tensors = int(degen.get("changed_tensors", 0))
-    rel_norm = degen.get("rel_norm_diff_to_base")
-    dom_stat = (gate_report.get("stats") or {}).get(domain_input) or {}
+    rel_norm = degen.get("rel_norm_diff_to_base")  # recorded for reference only
+    tv_base_ratio = degen.get("merged_to_max_input_delta_ratio")
+    dom_stat = stats.get(domain_input) or {}
     proj = dom_stat.get("projection_coeff")
 
     if changed_tensors <= 0:
         failures.append({"check": "changed_tensors", "changed_tensors": changed_tensors})
-    if rel_norm is None or float(rel_norm) < min_rel_norm:
+
+    if tv_base_ratio is None or float(tv_base_ratio) < min_tv_ratio:
         failures.append({
-            "check": "rel_norm_diff_to_base",
-            "value": rel_norm,
-            "threshold": min_rel_norm,
+            "check": "merged_to_max_input_delta_ratio",
+            "value": tv_base_ratio,
+            "threshold": min_tv_ratio,
         })
+
+    # Check closeness to every input model (||theta_merged - theta_i|| / ||Delta_i|| >= min_tv_ratio)
+    input_tv_ratios: Dict[str, Optional[float]] = {}
+    for k, v in stats.items():
+        if isinstance(v, dict) and "dist_to_merged_tv_ratio" in v:
+            ratio = v.get("dist_to_merged_tv_ratio")
+            input_tv_ratios[k] = ratio
+            if ratio is not None and float(ratio) < min_tv_ratio:
+                failures.append({
+                    "check": "close_to_input_tv_ratio",
+                    "input_model": k,
+                    "value": ratio,
+                    "threshold": min_tv_ratio,
+                })
+
     if proj is None or float(proj) < min_proj:
         failures.append({
             "check": "domain_projection_coeff",
@@ -69,11 +93,11 @@ def evaluate_smoke_criteria(
             "threshold": min_proj,
         })
 
-    # 5. Shape-mismatch skipped tensors recorded
+    # 6. Shape-mismatch skipped tensors recorded
     if "skipped_shape_mismatch_names" not in merge_meta:
         failures.append({"check": "skipped_shape_mismatch_recorded", "reason": "field missing from merge_metadata.json"})
 
-    # 6. Math sanity correctness + differs from base output
+    # 7. Math sanity correctness + differs from base output
     math_correct = None
     differs_from_base = None
     if merged_responses is not None:
@@ -105,6 +129,11 @@ def evaluate_smoke_criteria(
 
     return {
         "passed": len(failures) == 0,
+        "criteria_version": "tv_norm_v2_20261126",
+        "thresholds": {
+            "min_tv_ratio": min_tv_ratio,
+            "min_proj": min_proj,
+        },
         "failures": failures,
         "summary": {
             "scores_complete": scores_complete,
@@ -113,7 +142,9 @@ def evaluate_smoke_criteria(
                 for k, v in score_check.items()
             },
             "changed_tensors": changed_tensors,
-            "rel_norm_diff_to_base": rel_norm,
+            "merged_to_max_input_delta_ratio": tv_base_ratio,
+            "input_dist_tv_ratios": input_tv_ratios,
+            "rel_norm_diff_to_base_ref_only": rel_norm,
             "domain_projection_coeff": proj,
             "skipped_shape_mismatch_names": merge_meta.get("skipped_shape_mismatch_names", []),
             "math_correct": math_correct,
@@ -143,13 +174,15 @@ def generate_responses(model_path: str, prompts: List[tuple]) -> List[Dict[str, 
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Verify LED-Merging smoke test against all strict Section 4.2 criteria")
+    ap = argparse.ArgumentParser(description="Verify LED-Merging smoke test against revised Section 4.2 criteria")
     ap.add_argument("--base", required=True)
     ap.add_argument("--merged", required=True)
     ap.add_argument("--domain-input", required=True)
     ap.add_argument("--gate-json", required=True)
-    ap.add_argument("--min-rel-norm", type=float, default=0.01)
+    ap.add_argument("--min-tv-ratio", type=float, default=0.05)
     ap.add_argument("--min-proj", type=float, default=0.10)
+    ap.add_argument("--reuse-responses-json", default=None,
+                    help="reuse merged_responses/base_responses from a prior smoke_check.json without GPU generation")
     ap.add_argument("--skip-generation", action="store_true")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
@@ -161,7 +194,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     merged_resps = None
     base_resps = None
-    if not args.skip_generation:
+    if args.reuse_responses_json:
+        with open(args.reuse_responses_json, encoding="utf-8") as f:
+            prev = json.load(f)
+        merged_resps = prev.get("merged_responses")
+        base_resps = prev.get("base_responses")
+    elif not args.skip_generation:
         merged_resps = generate_responses(args.merged, MATH_SMOKE_PROMPTS)
         base_resps = generate_responses(args.base, MATH_SMOKE_PROMPTS)
 
@@ -171,7 +209,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         domain_input=args.domain_input,
         merged_responses=merged_resps,
         base_responses=base_resps,
-        min_rel_norm=args.min_rel_norm,
+        min_tv_ratio=args.min_tv_ratio,
         min_proj=args.min_proj,
     )
     if merged_resps is not None:

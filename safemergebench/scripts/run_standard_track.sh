@@ -206,14 +206,31 @@ run_combo() {
       --task-names "$task_names" --temp 1.0 --max-per-task 20 --seed "$SEED" \
       --out "${merged_root}/LMCocktail_task_names_${task_names}_temp_1.0"
 
-  # External: LED-Merging (single default point)
+  # External: LED-Merging — official default (safety=0.1, math=0.4, code=0.5)
+  # plus 2 extra safety_rate points (0.3, 0.5) reusing cached locate/score (Confirmation #2)
   local model_fam="llama3"
   [[ "$base_short" == *gemma* ]] && model_fam="gemma2"
+  local led_cache="${merged_root}/.led_locate_cache_${task_names}"
   run_or_skip "${merged_root}/LEDMerging_task_names_${task_names}" \
     "$PYTHON_BIN" ./safemerge/external/run_led_merging.py \
       --base "$base_model" --inputs "${inputs[@]}" --orders "${orders[@]}" \
       --task-names "$task_names" --model-family "$model_fam" --seed "$SEED" \
+      --workdir "$led_cache" --keep-workdir --config-role official_default \
       --out "${merged_root}/LEDMerging_task_names_${task_names}"
+
+  if [[ "$n_models" == "2" && "${orders[0]}" == "safety" ]]; then
+    local dom_rate="0.4"
+    [[ "${orders[1]}" == "code" ]] && dom_rate="0.5"
+    for sr in 0.3 0.5; do
+      run_or_skip "${merged_root}/LEDMerging_task_names_${task_names}_safety_rate_${sr}" \
+        "$PYTHON_BIN" ./safemerge/external/run_led_merging.py \
+          --base "$base_model" --inputs "${inputs[@]}" --orders "${orders[@]}" \
+          --fuse-rates "$sr" "$dom_rate" \
+          --task-names "$task_names" --model-family "$model_fam" --seed "$SEED" \
+          --reuse-locate-dir "$led_cache/locate/score" --config-role extra_safety_sweep \
+          --out "${merged_root}/LEDMerging_task_names_${task_names}_safety_rate_${sr}"
+    done
+  fi
 }
 
 should_run() {

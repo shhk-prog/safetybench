@@ -72,5 +72,18 @@ During pre-experiment smoke testing on `iag-02` (`torch 2.14.1`, `transformers 5
 - **Observation**: Fixing `rope_theta` alone did not stop collapse (DARE: 97.5% -> 99.4–100%, SST: 89.1% -> 72.0–93.8%; Task Arithmetic had low collapse both before and after). Thus `rope_theta` mismatch alone does not explain collapse (WizardCoder also differs in vocab size 32,001 and pretraining lineage; not separately isolated here).
 - **Default policy in `integrity_gate.py`**:
   - **Hard Fail (exit code 1)**: Lineage mismatch (`median_rel_dist > 0.50`, calibrated on WizardMath 2.74%, WizardCoder 113.5%, MedAlpaca 154.7%; configurable via `--lineage-thr`), non-finite weights, and `--expect-algo` metadata mismatch.
-  - **Warning (exit code 0, annotated in tables)**: Config mismatch (`rope_theta`, `vocab_size`, `eos_token_id`, etc.), chat template mismatch, and degeneration (Section 4.2: rel norm < 1% or domain projection < 10%).
+  - **Warning (exit code 0, annotated in tables)**: Config mismatch (`rope_theta`, `vocab_size`, `eos_token_id`, etc.), chat template mismatch, and degeneration (Section 4.2, revised below).
   - **Infeasible**: When vocab mismatch causes merging itself to fail (e.g., LM-Cocktail), recorded explicitly as infeasible rather than silently dropped.
+
+### 5. Section 4.2 Degeneration Threshold Revision & LED-Merging Sweep Protocol (2026-11-26)
+- **Why the denominator was revised**: In the `Llama-3.2-3B-Instruct` strict LED-Merging smoke test (`results/runs/20261126-1444_led-merging-strict-smoke-and-repro`), single MergeBench experts themselves had base-weight relative distances `||theta_expert - theta_base|| / ||theta_base||` of only **0.6775%** (`_coding`), **0.9790%** (`_safety`), and **1.4149%** (`_math`). Thus the initial `>= 1%` threshold against `||theta_base||` was mathematically unreachable even by copying `_coding` unchanged.
+- **Revised criteria (applied identically in `integrity_gate.py --weights` and `led_smoke_check.py`)**:
+  1. **Zero updated tensors**: `changed_tensors == 0`.
+  2. **Degenerate to base**: `||Delta_merged|| / max_i ||Delta_i|| < 5%` (`0.05`).
+  3. **Degenerate to any input**: `||theta_merged - theta_i|| / ||Delta_i|| < 5%` (`0.05`) for any input `i` with `||Delta_i|| > 0`.
+  4. **Domain update not retained**: `projection_coeff < 10%` (`0.10`).
+  - `rel_norm_diff_to_base = ||Delta_merged|| / ||theta_base||` remains recorded in JSON reports for reference only, NOT used for pass/fail judgement.
+  - Lineage check (`median_rel_dist > 50%`) is unchanged because mismatched pretraining lineages exceed 100%.
+- **LED-Merging protocol (`run_led_merging.py` & `run_standard_track.sh`)**:
+  - Primary point (`config_role: "official_default"`): official README L79 `fuse_rates` (`safety=0.1, math=0.4, code=0.5`).
+  - Supplementary curve points (`config_role: "extra_safety_sweep"`): `safety_rate` in `{0.3, 0.5}` (keeping official domain rate `0.4`/`0.5`), reusing cached `locate/score` via `--reuse-locate-dir` and explicitly distinguished from `official_default` in `merge_metadata.json` and comparison tables.
