@@ -131,7 +131,7 @@ def main(args):
     else:
         task_group = None
 
-    recorded_algo = args.record_as or args.algo
+    recorded_algo = args.record_as or ("RegMeanFP32" if args.algo == "RegMean" and getattr(args, "regmean_fp32", False) else args.algo)
     save_path = args.save_path + args.base_model.split('/')[1] + '_merged/' + recorded_algo
     if task_group:
         save_path += '_task_names_' + task_group

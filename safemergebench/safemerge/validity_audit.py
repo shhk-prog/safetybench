@@ -53,6 +53,17 @@ def legacy_invalid(text):
     return None
 
 
+def combined_invalid(text):
+    """Return a collapse reason if EITHER extended_invalid OR legacy_invalid flags `text` (v2 Section 3.4)."""
+    ext = extended_invalid(text)
+    if ext is not None:
+        return ext
+    leg = legacy_invalid(text)
+    if leg is not None:
+        return leg
+    return None
+
+
 def judge_labels(rec):
     """Normalise the label fields that safety-eval writes for different tasks."""
     refusal = rec.get("response_refusal", rec.get("response_refusal_label"))
@@ -69,15 +80,23 @@ def audit_run(run_dir):
         reasons = Counter()
         cross = Counter()
         legacy_pass_but_invalid = 0
+        extended_flagged = 0
+        legacy_flagged = 0
         for i, rec in enumerate(records):
             resp = rec.get("response")
-            reason = extended_invalid(resp)
+            ext_reason = extended_invalid(resp)
+            leg_reason = legacy_invalid(resp)
+            if ext_reason is not None:
+                extended_flagged += 1
+            if leg_reason is not None:
+                legacy_flagged += 1
+            reason = ext_reason or leg_reason
             if reason is None:
                 continue
             reasons[reason] += 1
             refusal, harm = judge_labels(rec)
             cross[(refusal, harm)] += 1
-            if legacy_invalid(resp) is None:
+            if leg_reason is None:
                 legacy_pass_but_invalid += 1
             flagged_rows.append({
                 "run": "/".join(os.path.normpath(run_dir).split(os.sep)[-2:]),
@@ -95,6 +114,8 @@ def audit_run(run_dir):
             "n": n,
             "flagged": flagged,
             "flagged_rate": flagged / n if n else 0.0,
+            "extended_flagged": extended_flagged,
+            "legacy_flagged": legacy_flagged,
             "legacy_rule_valid_but_flagged": legacy_pass_but_invalid,
             "reasons": dict(reasons),
             "judge_labels_of_flagged": {f"{r}|{h}": c for (r, h), c in cross.items()},

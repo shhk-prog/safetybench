@@ -11,9 +11,17 @@
 #     (domain_coef=1.0 fixed, safety_coef in {0.2..1.0}).
 #
 # Usage:
-#   bash scripts/run_standard_track.sh [--priority 1|2|3|4|all] [--gpu 1] [--seed 42] [--include-asymmetric-ta] [--dry-run]
+#   bash scripts/run_standard_track.sh --run-dir RUN_DIR [--priority 1|2|3|4|all] [--gpu 1] [--seed 42] [--include-asymmetric-ta] [--dry-run]
 
 set -euo pipefail
+
+ORIG_ARGS=("$@")
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_run_dir_lib.sh"
+extract_run_dir_arg "$@"
+set -- "${REMAINING_ARGS[@]}"
+record_run_command "$RUN_DIR" bash "$0" "${ORIG_ARGS[@]}"
 
 PRIORITY="1"
 GPU_ID="1"
@@ -38,18 +46,29 @@ done
 
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 ALPHAS=(0.2 0.4 0.6 0.8 1.0)
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if [[ "$PYTHON_BIN" == "python3" && -x "$ROOT/.venvs/merging/bin/python" ]]; then
   PYTHON_BIN="$ROOT/.venvs/merging/bin/python"
 fi
 
+record_merge_artifact() {
+  local out_dir="$1"
+  if [[ -f "$out_dir/merge_metadata.json" ]]; then
+    mkdir -p "$RUN_DIR/outputs/merge_metadata"
+    local base_tag
+    base_tag="$(basename "$(dirname "$out_dir")")__$(basename "$out_dir")"
+    cp "$out_dir/merge_metadata.json" "$RUN_DIR/outputs/merge_metadata/${base_tag}.json"
+    printf '%s\n' "$(cd "$out_dir" && pwd)" >> "$RUN_DIR/outputs/merged_model_paths.txt"
+  fi
+}
+
 run_or_skip() {
   local out_dir="$1"
   shift
   if [[ -f "$out_dir/merge_metadata.json" ]]; then
     echo "[SKIP] $out_dir (merge_metadata.json exists)"
+    record_merge_artifact "$out_dir"
     return 0
   fi
   echo "[RUN] $*"
@@ -57,6 +76,7 @@ run_or_skip() {
     return 0
   fi
   "$@"
+  record_merge_artifact "$out_dir"
 }
 
 task_to_domain() {
@@ -147,6 +167,11 @@ run_combo() {
   # 3. Single-point methods: Localize-and-Stitch, RegMean, RegMean++, Fisher, LED-Merging, Hammoud et al. (LM-Cocktail)
   run_or_skip "${merged_root}/LocalizeAndStitch_task_names_${task_names}_sparsity_0.1_dataless_True_sigmoid_bias_3" \
     "$PYTHON_BIN" ./merging/main.py --algo LocalizeAndStitch --sparsity 0.1 --dataless \
+      --base-model "$base_model" --task_names "$task_names" --seed "$SEED" --save-path "$SAVE_ROOT"
+
+  # RegMean: float32 primary comparison version + upstream bfloat16 reference (Section 3.6)
+  run_or_skip "${merged_root}/RegMeanFP32_task_names_${task_names}_reduction_0.5_regmean_fp32_True" \
+    "$PYTHON_BIN" ./merging/main.py --algo RegMean --reduction 0.5 --regmean-fp32 \
       --base-model "$base_model" --task_names "$task_names" --seed "$SEED" --save-path "$SAVE_ROOT"
 
   run_or_skip "${merged_root}/RegMean_task_names_${task_names}_reduction_0.5" \

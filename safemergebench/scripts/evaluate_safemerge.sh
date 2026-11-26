@@ -9,11 +9,24 @@
 #   4. extra safety benchmarks (held out from coefficient tuning) + 3 judges + metrics
 #
 # Usage:
-#   bash scripts/evaluate_safemerge.sh MODEL GPU_ID OUTPUT_PATH BASE_MODEL "INPUT1 INPUT2 ..." [TEMPLATE] [EXPECT_ALGO]
+#   bash scripts/evaluate_safemerge.sh --run-dir RUN_DIR MODEL GPU_ID OUTPUT_PATH BASE_MODEL "INPUT1 INPUT2 ..." [TEMPLATE] [EXPECT_ALGO]
 # TEMPLATE: llama3 | gemma | plain (default: inferred from the model name; pretrained
 #           bases without a chat template must be given explicitly).
 
 set -euo pipefail
+
+ORIG_ARGS=("$@")
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_run_dir_lib.sh"
+extract_run_dir_arg "$@"
+set -- "${REMAINING_ARGS[@]}"
+record_run_command "$RUN_DIR" bash "$0" "${ORIG_ARGS[@]}"
+
+if [[ $# -lt 5 ]]; then
+  echo "Usage: bash scripts/evaluate_safemerge.sh --run-dir RUN_DIR MODEL GPU_ID OUTPUT_PATH BASE_MODEL \"INPUT1 INPUT2 ...\" [TEMPLATE] [EXPECT_ALGO]" >&2
+  exit 2
+fi
 
 MODEL=$1
 GPU_ID=$2
@@ -22,8 +35,6 @@ BASE_MODEL=$4
 INPUTS=$5
 TEMPLATE=${6:-}
 EXPECT_ALGO=${7:-}
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ -z "$TEMPLATE" ]; then
   case "$(basename "$MODEL") $(basename "$BASE_MODEL")" in
@@ -93,6 +104,29 @@ GATE_PY="python3"
 if [ -x "$ROOT/.venvs/merging/bin/python" ]; then
   GATE_PY="$ROOT/.venvs/merging/bin/python"
 fi
+
+# ---- 1b. Section 2.3 eval_lock verification for merged models ----
+# Single experts/bases pass SINGLE_EXPERT_EVAL=1 (or MODEL==BASE_MODEL / MODEL==INPUTS);
+# merged models MUST match configs/eval_lock.yaml hash before evaluation starts.
+LOCK_FILE="${EVAL_LOCK_FILE:-$ROOT/configs/eval_lock.yaml}"
+IS_SINGLE_EXPERT="0"
+if [ "${SINGLE_EXPERT_EVAL:-0}" = "1" ] || [ "$MODEL" = "$BASE_MODEL" ] || [ "$MODEL" = "$INPUTS" ]; then
+  IS_SINGLE_EXPERT="1"
+fi
+if [ "$IS_SINGLE_EXPERT" != "1" ]; then
+  if [ ! -f "$LOCK_FILE" ]; then
+    echo "EVAL LOCK ERROR: $LOCK_FILE not found. Verify single experts via utility_gate.py and lock settings before evaluating merged models (Section 2.3)." >&2
+    exit 4
+  fi
+  if [ -n "${EVAL_RUNTIME_CONFIG:-}" ]; then
+    if ! "$GATE_PY" "$ROOT/safemerge/utility_gate.py" verify-lock --lock "$LOCK_FILE" --runtime-config "$EVAL_RUNTIME_CONFIG"; then
+      echo "EVAL LOCK MISMATCH: runtime config does not match $LOCK_FILE (Section 2.3)." >&2
+      exit 4
+    fi
+  fi
+  cp "$LOCK_FILE" "$RUN_DIR/config/eval_lock.yaml"
+fi
+
 GATE_ARGS=(--base "$BASE_MODEL" --inputs $INPUTS --merged "$MODEL" --report "$ABS_OUT/gate.json")
 [ -n "$GATE_TEMPLATE" ] && GATE_ARGS+=(--eval-template "$GATE_TEMPLATE")
 [ -n "$EXPECT_ALGO" ] && GATE_ARGS+=(--expect-algo "$EXPECT_ALGO")
@@ -128,7 +162,7 @@ if [ "${SKIP_UTILITY:-0}" != "1" ]; then
   activate_env lmeval
   if ! has_lmeval_task "$ABS_OUT" "gsm8k_cot"; then
     lm_eval --model hf --model_args pretrained="$MODEL" --tasks gsm8k_cot \
-      --device cuda:0 --batch_size 16 --output_path "$ABS_OUT"
+      --device cuda:0 --batch_size 16 --log_samples --output_path "$ABS_OUT"
   else
     echo "[SKIP] gsm8k_cot already present under $ABS_OUT"
   fi
@@ -157,7 +191,8 @@ if [ "${SKIP_UTILITY:-0}" != "1" ]; then
       pushd "$ROOT/bigcode-evaluation-harness" >/dev/null
       accelerate launch main.py --model "$MODEL" --max_length_generation 512 --precision bf16 \
         --tasks humanevalplus,mbppplus --temperature 0.2 --n_samples 10 --batch_size 10 \
-        --allow_code_execution --metric_output_path "$ABS_OUT/code_eval.json" --use_auth_token
+        --allow_code_execution --save_generations --save_generations_path "$ABS_OUT/code_generations.json" \
+        --metric_output_path "$ABS_OUT/code_eval.json" --use_auth_token
       popd >/dev/null
       deactivate_env
     else
@@ -216,4 +251,4 @@ deactivate_env
 
 # ---- 5. response-validity audit & metrics ----
 python3 "$ROOT/safemerge/validity_audit.py" "$ABS_OUT" --out "$ABS_OUT/validity" --sample 50
-python3 "$ROOT/safemerge/metrics.py" "$ABS_OUT" --track "${TRACK:-standard}" --out-dir "$ROOT/results/metrics"
+python3 "$ROOT/safemerge/metrics.py" "$ABS_OUT" --track "${TRACK:-standard}" --out-dir "$RUN_DIR/outputs/metrics"

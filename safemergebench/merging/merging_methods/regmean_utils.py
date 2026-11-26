@@ -30,7 +30,7 @@ def send_inputs_to_device(inputs, device):
     return inputs
 
 
-def compute_grams(trainer, finetuned_model, train_dataloader):
+def compute_grams(trainer, finetuned_model, train_dataloader, gram_dtype=None):
     covs = {}
     xn = {}
 
@@ -41,6 +41,8 @@ def compute_grams(trainer, finetuned_model, train_dataloader):
             """
             x = input[0].detach()  # $[b,t,h]
             x = x.view(-1, x.size(-1))
+            if gram_dtype is not None:
+                x = x.to(dtype=gram_dtype)
             xtx = torch.matmul(x.transpose(0, 1), x)  # [h,h]
             if name not in covs:
                 covs[name] = xtx / x.size(0)

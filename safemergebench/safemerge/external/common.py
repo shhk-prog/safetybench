@@ -110,3 +110,89 @@ def ensure_tokenizer_saved(source_model: str, out_dir: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def write_infeasible_metadata(
+    out_dir: str,
+    algo: str,
+    base_model: str,
+    inputs: List[str],
+    reason: str,
+    kwargs: Optional[Dict[str, Any]] = None,
+    task_names: Optional[str] = None,
+    seed: int = 42,
+) -> str:
+    """Record an infeasible merge attempt (e.g., vocab_size mismatch in LM-Cocktail, Section 4.4)."""
+    return write_merge_metadata(
+        out_dir=out_dir,
+        algo=algo,
+        kwargs=kwargs or {},
+        base_model=base_model,
+        inputs=inputs,
+        task_names=task_names,
+        seed=seed,
+        extra={
+            "status": "infeasible",
+            "infeasible_reason": reason,
+        },
+    )
+
+
+def record_safety_injection_norm(
+    merged_dir: str,
+    no_safety_ref: str,
+    ta_same_alpha_norm: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Compute float32 L2 norm ||theta_merged - theta_no_safety|| and ratio vs same-alpha TA (Section 4.1),
+    and persist into `merged_dir/merge_metadata.json`.
+    """
+    import math
+    import sys
+    import torch
+
+    safemerge_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if safemerge_dir not in sys.path:
+        sys.path.insert(0, safemerge_dir)
+    from integrity_gate import _TensorStore  # noqa: E402
+
+    m_store = _TensorStore(merged_dir)
+    r_store = _TensorStore(no_safety_ref)
+    try:
+        diff_sq = 0.0
+        ref_sq = 0.0
+        n_tensors = 0
+        for k in m_store.keys():
+            if not r_store.has(k):
+                continue
+            mv = m_store.get_f32(k)
+            rv = r_store.get_f32(k)
+            if mv.shape != rv.shape:
+                continue
+            d = mv - rv
+            diff_sq += float(torch.dot(d.flatten(), d.flatten()).item())
+            ref_sq += float(torch.dot(rv.flatten(), rv.flatten()).item())
+            n_tensors += 1
+        norm = math.sqrt(diff_sq)
+        rel_norm = (norm / math.sqrt(ref_sq)) if ref_sq > 0 else None
+        ratio = (norm / ta_same_alpha_norm) if (ta_same_alpha_norm and ta_same_alpha_norm > 0) else None
+    finally:
+        m_store.close()
+        r_store.close()
+
+    info = {
+        "no_safety_reference": no_safety_ref,
+        "safety_update_l2_norm": round(norm, 6),
+        "safety_update_rel_norm": round(rel_norm, 6) if rel_norm is not None else None,
+        "ta_same_alpha_l2_norm": round(ta_same_alpha_norm, 6) if ta_same_alpha_norm is not None else None,
+        "ratio_to_same_alpha_ta": round(ratio, 6) if ratio is not None else None,
+        "n_tensors_compared": n_tensors,
+    }
+    meta_path = os.path.join(merged_dir, "merge_metadata.json")
+    meta = {}
+    if os.path.isfile(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    meta["safety_injection"] = info
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    return info

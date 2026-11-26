@@ -5,12 +5,20 @@
 # single-expert utility passes the P6 validity check.
 #
 # Usage:
-#   bash scripts/check_single_experts.sh [--gpu 1] [--out-root results/experts] [--dry-run]
+#   bash scripts/check_single_experts.sh --run-dir RUN_DIR [--gpu 1] [--out-root DIR] [--dry-run]
 
 set -euo pipefail
 
+ORIG_ARGS=("$@")
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_run_dir_lib.sh"
+extract_run_dir_arg "$@"
+set -- "${REMAINING_ARGS[@]}"
+record_run_command "$RUN_DIR" bash "$0" "${ORIG_ARGS[@]}"
+
 GPU_ID="1"
-OUT_ROOT="results/experts"
+OUT_ROOT="$RUN_DIR/outputs/experts"
 DRY_RUN="0"
 FILTER=""
 
@@ -24,7 +32,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 MODELS=(
@@ -49,7 +56,7 @@ for entry in "${MODELS[@]}"; do
     echo "[SKIP] $MODEL ($OUT already evaluated)"
     continue
   fi
-  CMD=(bash scripts/evaluate_safemerge.sh "$MODEL" "$GPU_ID" "$OUT" "$BASE" "$MODEL" "$TPL")
+  CMD=(bash scripts/evaluate_safemerge.sh --run-dir "$RUN_DIR" "$MODEL" "$GPU_ID" "$OUT" "$BASE" "$MODEL" "$TPL")
   echo "[RUN] SKIP_INLINE_JUDGE=1 ${CMD[*]}"
   if [[ "$DRY_RUN" == "0" ]]; then
     SKIP_INLINE_JUDGE=1 "${CMD[@]}"
@@ -58,5 +65,5 @@ done
 
 echo "[NEXT] After generation finishes, run multi-judge scoring once across all experts:"
 echo "  .venvs/safety-eval/bin/python safemerge/judge.py ${OUT_ROOT}/*/safety_generation*.json --judges harmbench,wildguard,strongreject"
-echo "  python3 safemerge/metrics.py ${OUT_ROOT}/* --track standard --out-dir results/metrics_experts"
-echo "  python3 safemerge/utility_check.py --measured ${OUT_ROOT} --out results/metrics_experts/utility_check.json"
+echo "  python3 safemerge/metrics.py ${OUT_ROOT}/* --track standard --out-dir ${RUN_DIR}/outputs/metrics"
+echo "  python3 safemerge/utility_check.py --measured ${OUT_ROOT} --out ${RUN_DIR}/outputs/metrics/utility_check.json"

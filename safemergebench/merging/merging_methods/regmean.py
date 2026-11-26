@@ -22,6 +22,8 @@ class RegMean(Merger):
     
     def merge(self, **kwargs):
         reduction = kwargs["reduction"]
+        use_fp32 = bool(kwargs.get("regmean_fp32", False))
+        gram_dtype = torch.float32 if use_fp32 else None
 
         exam_datasets = kwargs["task_names"].split("-")
 
@@ -42,7 +44,7 @@ class RegMean(Merger):
             trainer = task_loader.trainer
             dataloader = trainer.get_train_dataloader()
             with torch.no_grad():
-                grams = compute_grams(trainer, finetuned_model, dataloader)
+                grams = compute_grams(trainer, finetuned_model, dataloader, gram_dtype=gram_dtype)
             save_tensor_dict(grams, os.path.join(gram_dir, dataset_name)) # contains most (linear) params grams
             save_tensor_dict(finetuned_model.state_dict(), os.path.join(param_dir, dataset_name)) # contains all params
 
@@ -64,10 +66,15 @@ class RegMean(Merger):
                     module_name = name[:-len('.weight')]
                     if module_name in gram_module_names:
                         sum_gram, grams = None, None
+                        orig_param_dtype = None
                         for model_id in range(len(gram_dirs)):
                             param_grams = torch.load(os.path.join(gram_dirs[model_id], module_name + ".pt"), map_location='cpu').detach()
-                            param_grams = reduce_non_diag(param_grams, a=reduction) # avoid degeneration
                             param = torch.load(os.path.join(param_dirs[model_id], name + ".pt"), map_location='cpu').detach()
+                            orig_param_dtype = param.dtype
+                            if use_fp32:
+                                param_grams = param_grams.to(dtype=torch.float32)
+                                param = param.to(dtype=torch.float32)
+                            param_grams = reduce_non_diag(param_grams, a=reduction) # avoid degeneration
                             gram_m_w = torch.matmul(param_grams, param.transpose(0, 1))
                             if sum_gram is None:
                                 sum_gram = param_grams.clone()
@@ -80,11 +87,18 @@ class RegMean(Merger):
                         sum_gram_f32 = sum_gram.to(dtype=torch.float32)
                         cond_number = torch.linalg.cond(sum_gram_f32)
                         threshold = 1e8 
-                        if cond_number > threshold or torch.any(torch.diag(sum_gram_f32) == 0):
-                            sum_gram_inv = torch.linalg.pinv(sum_gram_f32).to(dtype=sum_gram_m_ws.dtype)
+                        if use_fp32:
+                            if cond_number > threshold or torch.any(torch.diag(sum_gram_f32) == 0):
+                                sum_gram_inv = torch.linalg.pinv(sum_gram_f32)
+                            else:
+                                sum_gram_inv = torch.inverse(sum_gram_f32)
+                            wt = torch.matmul(sum_gram_inv, sum_gram_m_ws.to(dtype=torch.float32)).to(dtype=orig_param_dtype)
                         else:
-                            sum_gram_inv = torch.inverse(sum_gram_f32).to(dtype=sum_gram_m_ws.dtype)
-                        wt = torch.matmul(sum_gram_inv, sum_gram_m_ws)
+                            if cond_number > threshold or torch.any(torch.diag(sum_gram_f32) == 0):
+                                sum_gram_inv = torch.linalg.pinv(sum_gram_f32).to(dtype=sum_gram_m_ws.dtype)
+                            else:
+                                sum_gram_inv = torch.inverse(sum_gram_f32).to(dtype=sum_gram_m_ws.dtype)
+                            wt = torch.matmul(sum_gram_inv, sum_gram_m_ws)
                         avg_params[name] = wt.transpose(0, 1)
                         h_avged = True
                 

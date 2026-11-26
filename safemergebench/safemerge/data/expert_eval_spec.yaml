@@ -1,0 +1,274 @@
+# SafeMergeBench Single-Expert Evaluation Specification (Implementation Spec v2, Section 2.1)
+# Principle: Merged models may ONLY be evaluated with settings verified & locked on single experts.
+
+schema_version: 2
+
+extractors:
+  math_unified_v1:
+    description: "Unified math answer extractor: (1) \\boxed{...}, (2) 'The (final) answer is ...', (3) #### <num>, (4) last numeric token."
+    order:
+      - "boxed"
+      - "the_answer_is"
+      - "hash_four"
+      - "last_number"
+    numeric_only: true
+
+  code_bigcode_v1:
+    description: "bigcode-evaluation-harness / EvalPlus standard Python code extraction and unit-test execution."
+    numeric_only: false
+
+  mcqa_option_v1:
+    description: "Multiple-choice option extractor (A/B/C/D) for MedQA / PubMedQA."
+    numeric_only: false
+
+models:
+  # ============================================================================
+  # Standard Track: Llama-3.1-8B-Instruct (MergeBench, NeurIPS 2025)
+  # ============================================================================
+  meta-llama/Llama-3.1-8B-Instruct:
+    track: standard
+    role: base
+    domain: base
+    prompt_format:
+      safety: "hf (tokenizer.apply_chat_template with Llama-3.1 official system prompt)"
+      math: "lm-eval gsm8k_cot (8-shot CoT, no chat template override; --log_samples required)"
+      coding: "bigcode-evaluation-harness humanevalplus,mbppplus (base completion prompt)"
+    prompt_source: "Meta Llama-3.1-8B-Instruct model card & MergeBench/scripts/evaluate.sh (dedf1b1)"
+    extractor:
+      math: math_unified_v1
+      coding: code_bigcode_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      coding: {temperature: 0.2, max_length_generation: 512, n_samples_per_task: 10}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Reference base; measured 77.41% (2026-11-26)"}
+      humanevalplus: {score: null, source: "Reference base; measured 59.88% pass@1 (2026-11-26)"}
+      mbppplus: {score: null, source: "Reference base; measured 58.28% pass@1 (2026-11-26)"}
+
+  MergeBench/Llama-3.1-8B-Instruct_safety:
+    track: standard
+    role: expert
+    domain: safety
+    base_model: meta-llama/Llama-3.1-8B-Instruct
+    prompt_format:
+      safety: "hf (tokenizer.apply_chat_template; Llama-3.1 chat template verified in hf_inventory)"
+      math: "lm-eval gsm8k_cot (--log_samples required)"
+      coding: "bigcode-evaluation-harness humanevalplus,mbppplus"
+    prompt_source: "MergeBench HF model card & MergeBench/scripts/evaluate.sh (dedf1b1)"
+    extractor:
+      math: math_unified_v1
+      coding: code_bigcode_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      coding: {temperature: 0.2, max_length_generation: 512, n_samples_per_task: 10}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Not tabulated in arXiv:2505.10833; check VRR>=0.95 and safety improvement vs base"}
+
+  MergeBench/Llama-3.1-8B-Instruct_math:
+    track: standard
+    role: expert
+    domain: math
+    base_model: meta-llama/Llama-3.1-8B-Instruct
+    prompt_format:
+      safety: "hf (tokenizer.apply_chat_template)"
+      math: "lm-eval gsm8k_cot (--log_samples required; DART-Math outputs 'The answer is $\\boxed{N}$.')"
+    prompt_source: "MergeBench HF model card (DartMath SFT) & MergeBench/scripts/evaluate.sh (dedf1b1)"
+    extractor:
+      math: math_unified_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Not tabulated raw in arXiv:2505.10833 (Table 17 merged Math avg 52.3-68.2%). Gate uses >= base (77.41%); measured 82.94% with math_unified_v1 vs 5.23% lm-eval '$.' bug."}
+
+  MergeBench/Llama-3.1-8B-Instruct_coding:
+    track: standard
+    role: expert
+    domain: coding
+    base_model: meta-llama/Llama-3.1-8B-Instruct
+    prompt_format:
+      safety: "hf (tokenizer.apply_chat_template)"
+      math: "lm-eval gsm8k_cot (--log_samples required)"
+      coding: "bigcode-evaluation-harness humanevalplus,mbppplus"
+    prompt_source: "MergeBench/scripts/llama-3.1-8b_code.yaml (L10-12: Magicoder-Evol-Instruct-110K) & MergeBench/scripts/evaluate.sh"
+    extractor:
+      math: math_unified_v1
+      coding: code_bigcode_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      coding: {temperature: 0.2, max_length_generation: 512, n_samples_per_task: 10}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      humanevalplus: {score: null, source: "Not tabulated raw in arXiv:2505.10833; gate uses >= base (59.88%), measured 65.43%"}
+      mbppplus: {score: null, source: "Not tabulated raw in arXiv:2505.10833; gate uses >= base (58.28%), measured 59.71%"}
+
+  # ============================================================================
+  # Standard Track: gemma-2-9b-it (MergeBench, NeurIPS 2025)
+  # ============================================================================
+  google/gemma-2-9b-it:
+    track: standard
+    role: base
+    domain: base
+    prompt_format:
+      safety: "hf (tokenizer.apply_chat_template; Gemma <start_of_turn>user\\n...<end_of_turn>\\n<start_of_turn>model\\n)"
+      math: "lm-eval gsm8k_cot (--log_samples required)"
+      coding: "bigcode-evaluation-harness humanevalplus,mbppplus"
+    prompt_source: "google/gemma-2-9b-it model card & MergeBench/scripts/evaluate.sh"
+    extractor:
+      math: math_unified_v1
+      coding: code_bigcode_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      coding: {temperature: 0.2, max_length_generation: 512, n_samples_per_task: 10}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Reference base"}
+
+  MergeBench/gemma-2-9b-it_safety:
+    track: standard
+    role: expert
+    domain: safety
+    base_model: google/gemma-2-9b-it
+    prompt_format:
+      safety: "hf (Gemma chat template via tokenizer.apply_chat_template)"
+      math: "lm-eval gsm8k_cot (--log_samples required)"
+    prompt_source: "MergeBench HF model card & MergeBench/scripts/evaluate.sh"
+    extractor:
+      math: math_unified_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Not tabulated raw in arXiv:2505.10833"}
+
+  MergeBench/gemma-2-9b-it_math:
+    track: standard
+    role: expert
+    domain: math
+    base_model: google/gemma-2-9b-it
+    prompt_format:
+      safety: "hf (Gemma chat template via tokenizer.apply_chat_template)"
+      math: "lm-eval gsm8k_cot (--log_samples required)"
+    prompt_source: "MergeBench HF model card & MergeBench/scripts/evaluate.sh"
+    extractor:
+      math: math_unified_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 1319, log_samples: true}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      gsm8k_cot: {score: null, source: "Not tabulated raw in arXiv:2505.10833; gate uses >= base"}
+
+  MergeBench/gemma-2-9b-it_coding:
+    track: standard
+    role: expert
+    domain: coding
+    base_model: google/gemma-2-9b-it
+    prompt_format:
+      safety: "hf (Gemma chat template via tokenizer.apply_chat_template)"
+      coding: "bigcode-evaluation-harness humanevalplus,mbppplus"
+    prompt_source: "MergeBench HF model card & MergeBench/scripts/evaluate.sh"
+    extractor:
+      coding: code_bigcode_v1
+    generation:
+      coding: {temperature: 0.2, max_length_generation: 512, n_samples_per_task: 10}
+      safety: {temperature: 0.0, max_new_tokens: 512, template: "hf"}
+    official_value:
+      humanevalplus: {score: null, source: "Not tabulated raw in arXiv:2505.10833; gate uses >= base"}
+      mbppplus: {score: null, source: "Not tabulated raw in arXiv:2505.10833; gate uses >= base"}
+
+  # ============================================================================
+  # Real-World Track: Llama-2-7B + WizardMath / WizardCoder / MedAlpaca (sst_v2)
+  # ============================================================================
+  meta-llama/Llama-2-7b-hf:
+    track: realworld
+    role: base
+    domain: base
+    prompt_format:
+      math: "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{question}\n\n### Response: Let's think step by step."
+      coding: "plain / HumanEval completion"
+      medical: "Context: {context}\nQuestion: {question}\nAnswer:"
+    prompt_source: "Meta Llama-2-7b-hf pretrained base (no chat template)"
+    extractor:
+      math: math_unified_v1
+      coding: code_bigcode_v1
+      medical: mcqa_option_v1
+    generation:
+      math: {temperature: 0.0, max_new_tokens: 512, n_samples: 320, full_n: 1319, log_samples: true}
+    official_value:
+      gsm8k: {score: null, source: "Reference base (measured 1.88% under Alpaca-CoT zero-shot)"}
+
+  WizardLMTeam/WizardMath-7B-V1.0:
+    track: realworld
+    role: expert
+    domain: math
+    base_model: meta-llama/Llama-2-7b-hf
+    prompt_format:
+      math: |
+        Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+        ### Instruction:
+        {question}
+
+        ### Response: Let's think step by step.
+    prompt_source: "Official WizardLM/WizardMath repo (gsm8k_eval.py) & sst_v2/v5/scripts/eval_math_alpaca_cot.py L48-55"
+    extractor:
+      math: math_unified_v1
+    generation:
+      math:
+        temperature: 0.0
+        max_new_tokens: 512
+        stop: ["</s>", "### Instruction:", "Question:", "\n\n\n"]
+        n_samples: 320
+        full_n: 1319
+        log_samples: true
+    official_value:
+      gsm8k: {score: 54.9, source: "WizardMath paper (arXiv:2308.09583) Table 1; verified 55.62% on 320 samples (diff +0.72pt <= 5pt)"}
+
+  vanillaOVO/WizardCoder-Python-7B-V1.0:
+    track: realworld
+    role: expert
+    domain: coding
+    base_model: meta-llama/Llama-2-7b-hf
+    prompt_format:
+      coding: |
+        Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+        ### Instruction:
+        Create a Python script for this problem:
+        {prompt}
+
+        ### Response:
+    prompt_source: "Official WizardLM/WizardCoder repo (WizardCoder/src/humaneval_gen.py generate_prompt) & WizardCoder-Python-7B-V1.0 model card"
+    extractor:
+      coding: code_bigcode_v1
+    generation:
+      coding:
+        temperature: 0.0
+        max_new_tokens: 512
+        n_samples: 164
+        log_samples: true
+    official_value:
+      humaneval: {score: 55.5, source: "WizardCoder-Python-7B-V1.0 model card / WizardCoder paper (arXiv:2306.08568); current sst_v2 setting yielded 21.03% (FAIL -> requires Section 2.5.1 verification)"}
+
+  medalpaca/medalpaca-7b:
+    track: realworld
+    role: expert
+    domain: medical
+    base_model: meta-llama/Llama-2-7b-hf
+    prompt_format:
+      medical: |
+        Context: {context}
+        Question: {question}
+        Answer:
+    prompt_source: "Official kbressem/medAlpaca repo (medalpaca/prompt_templates/medalpaca.json) & MedAlpaca paper (arXiv:2304.08247)"
+    extractor:
+      medical: mcqa_option_v1
+    generation:
+      medical:
+        temperature: 0.0
+        max_new_tokens: 64
+        log_samples: true
+    official_value:
+      medqa_4options: {score: 42.3, source: "MedAlpaca paper (arXiv:2304.08247)"}

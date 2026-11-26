@@ -31,6 +31,8 @@ def create_parser():
     # RegMean and RegMeanPlusPlus
     _parser.add_argument('--task_names', type=str)
     _parser.add_argument('--reduction', type=float)
+    _parser.add_argument('--regmean-fp32', dest='regmean_fp32', action='store_true',
+                         help='Accumulate RegMean Gram matrices and solve in float32 instead of upstream bfloat16 (Section 3.6)')
 
     # Fisher
     _parser.add_argument("--fisher_only", action="store_true", help='fisher-stage1')
@@ -72,6 +74,8 @@ def prepare_args(params):
     elif params.algo == 'RegMean' or params.algo == 'RegMeanPlusPlus':
         kwargs['task_names'] = params.task_names
         kwargs['reduction'] = params.reduction
+        if getattr(params, 'regmean_fp32', False):
+            kwargs['regmean_fp32'] = True
     elif params.algo == 'Fisher':
         kwargs['task_names'] = params.task_names
         kwargs['merge_only'] = params.merge_only

@@ -72,14 +72,35 @@ class TestGate(unittest.TestCase):
             a = make_model(d, "a", {**BASE_CFG, "rope_theta": 1000000.0}, GEMMA_TPL)
             m = make_model(d, "RegMean_x", BASE_CFG, None)
             rep = os.path.join(d, "r.json")
+            # Metadata mismatch (--expect-algo DARE vs RegMean) is a hard fail (rc=1);
+            # rope_theta & template mismatches are warnings per Section 4.4.
             rc = gate.main(["--base", base, "--inputs", a, "--merged", m, "--eval-template", "llama3",
                             "--expect-algo", "DARE", "--report", rep])
             self.assertEqual(rc, 1)
-            issues = json.load(open(rep))["issues"]
-            kinds = {(i["check"], i.get("key")) for i in issues}
-            self.assertIn(("config", "rope_theta"), kinds)
-            self.assertIn(("template", None), kinds)
-            self.assertIn(("metadata", None), kinds)
+            data = json.load(open(rep))
+            issue_kinds = {(i["check"], i.get("key")) for i in data["issues"]}
+            warn_kinds = {(w["check"], w.get("key")) for w in data["warnings"]}
+            self.assertIn(("metadata", None), issue_kinds)
+            self.assertIn(("config", "rope_theta"), warn_kinds)
+            self.assertIn(("template", None), warn_kinds)
+
+    def test_section_4_4_config_mismatch_warns_only_and_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = make_model(d, "base", {**BASE_CFG, "eos_token_id": [128001, 128009]}, LLAMA3_TPL)
+            a = make_model(d, "a", {**BASE_CFG, "rope_theta": 1000000.0, "vocab_size": 32001, "eos_token_id": 2}, GEMMA_TPL)
+            m = make_model(d, "TIES_x", BASE_CFG, LLAMA3_TPL)
+            rep = os.path.join(d, "warn_only.json")
+            rc = gate.main(["--base", base, "--inputs", a, "--merged", m,
+                            "--eval-template", "llama3", "--expect-algo", "TIES", "--report", rep])
+            self.assertEqual(rc, 0)
+            data = json.load(open(rep))
+            self.assertTrue(data["passed"])
+            self.assertEqual(data["issues"], [])
+            warn_keys = {(w["check"], w.get("key")) for w in data["warnings"]}
+            self.assertIn(("config", "rope_theta"), warn_keys)
+            self.assertIn(("config", "vocab_size"), warn_keys)
+            self.assertIn(("config", "eos_token_id"), warn_keys)
+            self.assertIn(("template", None), warn_keys)
 
     def test_eval_template_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
